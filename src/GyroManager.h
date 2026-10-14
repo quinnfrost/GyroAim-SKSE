@@ -11,16 +11,28 @@ namespace GyroAim {
         void Initialize();
         void Shutdown();
 
-        // Called from the ThirdPersonState::Update detour on the main thread.
+        // Called from the camera-state Update detours on the main thread.
         void OnThirdPersonUpdate(RE::ThirdPersonState* a_state);
+        void OnFirstPersonUpdate(RE::FirstPersonState* a_state);
+        void OnHorseCameraUpdate(RE::HorseCameraState* a_state);
 
     private:
         using TimePoint = std::chrono::steady_clock::time_point;
 
+        // Radians; not produced when the frame has no usable gyro motion.
+        struct FrameDelta {
+            float yaw{0.0F};
+            float pitch{0.0F};
+        };
+
         [[nodiscard]] bool IsBowDrawn() const;
         [[nodiscard]] bool IsActive() const;
+        [[nodiscard]] float Tick(TimePoint a_now);
+        [[nodiscard]] bool ComputeFrameDelta(float a_dt, FrameDelta& a_out);
         void ResetProcessing();
-        void LogHeartbeat(RE::ThirdPersonState* a_state, TimePoint a_now);
+        void LogHeartbeat(RE::TESCameraState* a_state, TimePoint a_now);
+        void ApplyToThirdPerson(RE::ThirdPersonState* a_state, const FrameDelta& a_delta);
+        void ApplyToFirstPerson(RE::FirstPersonState* a_state, const FrameDelta& a_delta);
 
         IGyroSource* _source{nullptr};
 

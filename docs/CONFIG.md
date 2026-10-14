@@ -1,6 +1,6 @@
-# GyroAim 配置与初版说明（Phase 0–1）
+# GyroAim 配置与初版说明（Phase 0–1.1）
 
-对应 `GYROAIM-PLAN.md` 的 Phase 0（工程基线）与 Phase 1（MVP）实现。
+对应 `GYROAIM-PLAN.md` 的 Phase 0（工程基线）、Phase 1（MVP）与 Phase 1.1（第一人称/骑马）实现。
 
 ## 部署
 
@@ -52,9 +52,24 @@ enableOnBowDraw = true     ; true = 仅拉弓瞄准时启用（决策 D8）；fa
 
 两种模式都只做**增量累加**且在原 `Update()` 之后写入（红线 3），右摇杆输入链完全不被触碰（约束 C1）。
 
+## Phase 1.1：第一人称与骑马相机
+
+按当前相机状态自动分流注入目标（`injectionMode` 只作用于第三人称/骑马）：
+
+| 相机状态 | yaw 写入 | pitch 写入 |
+|---|---|---|
+| 第三人称 | `freeRotation.x` 或 `targetYaw`/`currentYaw` 增量 | `freeRotation.y` 增量 |
+| 骑马（kMount） | 同第三人称 | 同第三人称 |
+| 第一人称 | `Actor::SetRotationZ` 增量（玩家朝向联动，右摇杆叠加不受影响） | `targetPitchOffset` + `currentPitchOffset` 增量（[-100,100] 两端钳制） |
+
+运行时验证点（对应 plan R3）：
+
+- 第一人称俯仰 offset 单位换算按 **1 单位 ≈ 1 度** 假设，手感偏差时优先怀疑此项；
+- 骑马相机 yaw 实际生效字段与第三人称相同（`HorseCameraState` 继承 `ThirdPersonState` 且不覆写 `Update`）；若无反应切 `injectionMode = yawPitch` 复测。
+
 ## 当前范围与已知限制
 
-- 仅第三人称（MVP，D6：第一人称为 Phase 4）；仅拉弓激活（D8，Phase 4 扩展弩/法术/蹲伏/按键）；
+- 第一人称、第三人称、骑马三种相机状态均已支持（Phase 1.1）；仅拉弓激活（D8，Phase 4 扩展弩/法术/蹲伏/按键）；
 - 陀螺数据用 `GetMotionData` 的 `rotVel`（角速度）；`driftCorrectedQuat` 逐帧差量语义为 Phase 2（D5），届时接入 GamepadMotionHelpers 做标定与 Player-Space；
 - 输入源仅 `steam`；`dsu` / `hid` 为 Phase 3；
 - 与 SmoothCam/TDM 共存为 Phase 5 测试矩阵项，冲突则按 C2 patch 化。
