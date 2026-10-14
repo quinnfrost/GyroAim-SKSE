@@ -8,15 +8,15 @@ namespace GyroAim {
         constexpr float kDegToRad = 0.017453292519943295F;
         constexpr float kRadToDeg = 57.29577951308232F;
 
-        [[nodiscard]] float AxisValue(const GyroSample& a_sample, GyroAxis a_axis) {
+        [[nodiscard]] float AxisValue(float a_x, float a_y, float a_z, GyroAxis a_axis) {
             switch (a_axis) {
                 case GyroAxis::kY:
-                    return a_sample.y;
+                    return a_y;
                 case GyroAxis::kZ:
-                    return a_sample.z;
+                    return a_z;
                 case GyroAxis::kX:
                 default:
-                    return a_sample.x;
+                    return a_x;
             }
         }
 
@@ -35,7 +35,16 @@ namespace GyroAim {
     }
 
     void GyroManager::Initialize() {
-        const auto inputSource = Config::GetSingleton()->GetSettings().inputSource;
+        const auto& settings = Config::GetSingleton()->GetSettings();
+
+        // Stillness-based drift compensation; can be disabled from the config.
+        if (settings.calibration) {
+            _motion.StartContinuousCalibration();
+        } else {
+            _motion.PauseContinuousCalibration();
+        }
+
+        const auto inputSource = settings.inputSource;
         switch (inputSource) {
             case InputSourceType::kSteam:
                 _source = SteamInputSource::GetSingleton();
@@ -65,21 +74,28 @@ namespace GyroAim {
         }
     }
 
-    bool GyroManager::IsBowDrawn() const {
+    bool GyroManager::IsBowAiming() const {
         const auto* player = RE::PlayerCharacter::GetSingleton();
         const auto* actorState = player ? player->AsActorState() : nullptr;
-        return actorState && actorState->GetAttackState() == RE::ATTACK_STATE_ENUM::kBowDrawn;
+        if (!actorState) {
+            return false;
+        }
+        // Fires the moment the trigger starts the draw, not only at full draw.
+        const auto state = static_cast<std::uint32_t>(actorState->GetAttackState());
+        return state >= static_cast<std::uint32_t>(RE::ATTACK_STATE_ENUM::kBowDraw) &&
+               state <= static_cast<std::uint32_t>(RE::ATTACK_STATE_ENUM::kBowNextAttack);
     }
 
     bool GyroManager::IsActive() const {
         const auto& settings = Config::GetSingleton()->GetSettings();
-        return settings.enableOnBowDraw ? IsBowDrawn() : true;
+        return settings.enableOnBowDraw ? IsBowAiming() : true;
     }
 
     void GyroManager::ResetProcessing() {
         _smoothYaw = 0.0F;
         _smoothPitch = 0.0F;
         _pitchAccum = 0.0F;
+        _hasOrientation = false;
     }
 
     void GyroManager::LogHeartbeat(RE::TESCameraState* a_state, TimePoint a_now) {
@@ -94,8 +110,16 @@ namespace GyroAim {
         const auto* actorState = player ? player->AsActorState() : nullptr;
         const auto attackState = actorState ? static_cast<std::uint32_t>(actorState->GetAttackState()) : ~0U;
 
-        SKSE::log::info("heartbeat camera={} attackState={} bowDrawn={} gyro={}"sv, CameraStateName(cameraId),
-                        attackState, IsBowDrawn(), _source != nullptr);
+        SKSE::log::info("heartbeat camera={} attackState={} bowAiming={} gyro={}"sv, CameraStateName(cameraId),
+                        attackState, IsBowAiming(), _source != nullptr);
+
+        // Ground truth for drift/axis investigations: accelMag ~9.8 => Steam posAccel is
+        // m/s^2 (current conversion correct), ~1.0 => already g. grav should be ~ (0,-1,0)
+        // at rest on a flat surface.
+        float gravX, gravY, gravZ;
+        _motion.GetGravity(gravX, gravY, gravZ);
+        SKSE::log::debug("motion accelMag={:.2f} grav=({:.2f}, {:.2f}, {:.2f}) out=({:.3f}, {:.3f}) deg/frame"sv,
+                         _lastAccelMag, gravX, gravY, gravZ, _lastYawDeg, _lastPitchDeg);
     }
 
     float GyroManager::Tick(TimePoint a_now) {
@@ -115,33 +139,121 @@ namespace GyroAim {
 
         _source->RunFrame();
         GyroSample raw;
-        if (!_source->SampleMotion(raw) || !IsActive()) {
+        if (!_source->SampleMotion(raw)) {
+            ResetProcessing();
+            return false;
+        }
+
+        // Gravity fusion and calibration stay warm even while the gyro is inactive.
+        _motion.ProcessMotion(raw.x, raw.y, raw.z, raw.accelX, raw.accelY, raw.accelZ, a_dt);
+        _lastAccelMag = std::hypot(raw.accelX, raw.accelY, raw.accelZ);
+
+        if (!IsActive()) {
             ResetProcessing();
             return false;
         }
 
         const auto& settings = Config::GetSingleton()->GetSettings();
 
-        float yawRate = AxisValue(raw, settings.yawAxis) * (settings.invertYaw ? -1.0F : 1.0F);
-        float pitchRate = AxisValue(raw, settings.pitchAxis) * (settings.invertPitch ? -1.0F : 1.0F);
-        if (std::hypot(yawRate, pitchRate) < settings.deadzoneDegPerSec) {
-            yawRate = 0.0F;
-            pitchRate = 0.0F;
+        // Per-frame pitch/yaw in degrees: fused-orientation delta (D5 semantics) or rate * dt.
+        float pitchDeg;
+        float yawDeg;
+        if (settings.gyroData == GyroData::kRotVel) {
+            float gyroX, gyroY, gyroZ;
+            _motion.GetCalibratedGyro(gyroX, gyroY, gyroZ);
+            float pitchRate;
+            float yawRate;
+            ConvertSpace(settings, gyroX, gyroY, gyroZ, pitchRate, yawRate);
+            pitchDeg = pitchRate * a_dt;
+            yawDeg = yawRate * a_dt;
+        } else if (!OrientationDeltaDegrees(settings, pitchDeg, yawDeg)) {
+            return false;  // orientation seed frame: keep state, no delta yet
+        }
+        _lastYawDeg = yawDeg;
+        _lastPitchDeg = pitchDeg;
+
+        // Per-axis deadzone in deg/s; per-frame degrees scale with dt.
+        if (std::fabs(yawDeg) < settings.yawDeadzoneDegPerSec * a_dt) {
+            yawDeg = 0.0F;
+        }
+        if (std::fabs(pitchDeg) < settings.pitchDeadzoneDegPerSec * a_dt) {
+            pitchDeg = 0.0F;
         }
 
         const float alpha = 1.0F - settings.smoothing;
-        _smoothYaw += alpha * (yawRate - _smoothYaw);
-        _smoothPitch += alpha * (pitchRate - _smoothPitch);
+        _smoothYaw += alpha * (yawDeg - _smoothYaw);
+        _smoothPitch += alpha * (pitchDeg - _smoothPitch);
 
-        const float deltaYaw = _smoothYaw * a_dt * settings.sensitivity * kDegToRad;
+        const float yawSign = settings.invertYaw ? -1.0F : 1.0F;
+        const float pitchSign = settings.invertPitch ? -1.0F : 1.0F;
+        const float deltaYaw = _smoothYaw * settings.yawSensitivity * yawSign * kDegToRad;
 
-        float deltaPitch = _smoothPitch * a_dt * settings.sensitivity * kDegToRad;
+        float deltaPitch = _smoothPitch * settings.pitchSensitivity * pitchSign * kDegToRad;
         const float clampRad = std::fabs(settings.pitchClampDeg) * kDegToRad;
         const float targetPitch = std::clamp(_pitchAccum + deltaPitch, -clampRad, clampRad);
         deltaPitch = targetPitch - _pitchAccum;
         _pitchAccum = targetPitch;
 
         a_out = FrameDelta{deltaYaw, deltaPitch};
+        return true;
+    }
+
+    void GyroManager::ConvertSpace(const Settings& a_settings, float a_x, float a_y, float a_z, float& a_pitch,
+                                   float& a_yaw) {
+        float gravX, gravY, gravZ;
+        _motion.GetGravity(gravX, gravY, gravZ);
+
+        switch (a_settings.gyroSpace) {
+            case GyroSpace::kPlayer:
+                GamepadMotion::CalculatePlayerSpaceGyro(a_pitch, a_yaw, a_x, a_y, a_z, gravX, gravY, gravZ,
+                                                        a_settings.yawRelaxFactor);
+                break;
+            case GyroSpace::kWorld:
+                GamepadMotion::CalculateWorldSpaceGyro(a_pitch, a_yaw, a_x, a_y, a_z, gravX, gravY, gravZ);
+                break;
+            case GyroSpace::kLocal:
+            default:
+                a_pitch = AxisValue(a_x, a_y, a_z, a_settings.pitchAxis);
+                a_yaw = AxisValue(a_x, a_y, a_z, a_settings.yawAxis);
+                break;
+        }
+    }
+
+    bool GyroManager::OrientationDeltaDegrees(const Settings& a_settings, float& a_pitchDeg, float& a_yawDeg) {
+        float w, x, y, z;
+        _motion.GetOrientation(w, x, y, z);
+
+        // q_delta = conj(previous) * current: this frame's rotation in device axes.
+        const Orientation previous = _prevOrientation;
+        _prevOrientation = Orientation{w, x, y, z};
+        if (!_hasOrientation) {
+            _hasOrientation = true;
+            a_pitchDeg = 0.0F;
+            a_yawDeg = 0.0F;
+            return false;
+        }
+
+        float qw = previous.w * w + previous.x * x + previous.y * y + previous.z * z;
+        float qx = previous.w * x - previous.x * w - previous.y * z + previous.z * y;
+        float qy = previous.w * y + previous.x * z - previous.y * w - previous.z * x;
+        float qz = previous.w * z - previous.x * y + previous.y * x - previous.z * w;
+        if (qw < 0.0F) {  // shortest arc
+            qw = -qw;
+            qx = -qx;
+            qy = -qy;
+            qz = -qz;
+        }
+
+        const float sinHalf = std::sqrt(qx * qx + qy * qy + qz * qz);
+        if (sinHalf < 1e-8F) {
+            a_pitchDeg = 0.0F;
+            a_yawDeg = 0.0F;
+            return true;
+        }
+
+        // Rotation vector in degrees on the device axes, then space conversion.
+        const float scale = 2.0F * std::atan2(sinHalf, qw) * kRadToDeg / sinHalf;
+        ConvertSpace(a_settings, qx * scale, qy * scale, qz * scale, a_pitchDeg, a_yawDeg);
         return true;
     }
 
@@ -171,39 +283,36 @@ namespace GyroAim {
         if (!ComputeFrameDelta(Tick(now), delta)) {
             return;
         }
-        ApplyToFirstPerson(a_state, delta);
-        SKSE::log::debug("fp inject yaw={:.4f} pitch={:.4f} pitchOffsets=({:.2f}, {:.2f})"sv, delta.yaw, delta.pitch,
-                         a_state->targetPitchOffset, a_state->currentPitchOffset);
+        ApplyToFirstPerson(delta);
+        const auto* player = RE::PlayerCharacter::GetSingleton();
+        SKSE::log::debug("fp inject yaw={:.4f} pitch={:.4f} playerAngle=({:.3f}, {:.3f})"sv, delta.yaw, delta.pitch,
+                         player ? player->data.angle.x : 0.0F, player ? player->data.angle.z : 0.0F);
     }
 
     void GyroManager::ApplyToThirdPerson(RE::ThirdPersonState* a_state, const FrameDelta& a_delta) {
-        const auto& settings = Config::GetSingleton()->GetSettings();
-
-        // Red line 3: increments only, applied after the original Update ran.
-        switch (settings.injectionMode) {
-            case InjectionMode::kYawPitch:
-                a_state->targetYaw += a_delta.yaw;
-                a_state->currentYaw += a_delta.yaw;
-                a_state->freeRotation.y += a_delta.pitch;
-                break;
-            case InjectionMode::kFreeRotation:
-            default:
-                a_state->freeRotation.x += a_delta.yaw;
-                a_state->freeRotation.y += a_delta.pitch;
-                break;
-        }
+        // 2026-10-14 rollback baseline: camera free-rotation increments only. The
+        // targetYaw- and player-heading-based modes were retired after field testing
+        // (free-camera artifact / crosshair mismatch). Red line 3: increments only,
+        // applied after the original Update ran.
+        a_state->freeRotation.x += a_delta.yaw;
+        a_state->freeRotation.y += a_delta.pitch;
     }
 
-    void GyroManager::ApplyToFirstPerson(RE::FirstPersonState* a_state, const FrameDelta& a_delta) {
-        // FP pitch lives in targetPitchOffset/currentPitchOffset ([-100, 100]);
-        // runtime validation assumes 1 offset unit == 1 degree.
-        const float pitchUnits = a_delta.pitch * kRadToDeg;
-        a_state->targetPitchOffset = std::clamp(a_state->targetPitchOffset + pitchUnits, -100.0F, 100.0F);
-        a_state->currentPitchOffset = std::clamp(a_state->currentPitchOffset + pitchUnits, -100.0F, 100.0F);
+    void GyroManager::ApplyToFirstPerson(const FrameDelta& a_delta) {
+        constexpr float kMaxPitch = 1.5533F;  // 89 degrees
 
-        // FP yaw is the player's heading; add increments so stick input is preserved.
-        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
-            player->SetRotationZ(player->data.angle.z + a_delta.yaw);
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            return;
         }
+
+        // FP yaw is the player heading; runtime testing showed the sign is opposite to
+        // the ThirdPersonState yaw fields (2026-10-14), so increments are subtracted.
+        player->SetRotationZ(player->data.angle.z - a_delta.yaw);
+
+        // FP look pitch lives in data.angle.x (up is negative, verified against
+        // ImprovedCameraSE-NG's look-pitch clamps). FirstPersonState's pitch offsets are
+        // re-derived from it every update, so writing them does not persist.
+        player->SetRotationX(std::clamp(player->data.angle.x - a_delta.pitch, -kMaxPitch, kMaxPitch));
     }
 }

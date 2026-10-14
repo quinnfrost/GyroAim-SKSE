@@ -3,24 +3,33 @@
 namespace GyroAim {
     enum class InputSourceType : std::uint32_t { kSteam, kDsu, kHid, kUnknown };
 
-    enum class InjectionMode : std::uint32_t { kFreeRotation, kYawPitch };
-
     enum class GyroAxis : std::uint32_t { kX, kY, kZ };
+
+    // D5: orientation frame-diff primary, angular velocity fallback.
+    enum class GyroData : std::uint32_t { kQuat, kRotVel };
+
+    enum class GyroSpace : std::uint32_t { kPlayer, kLocal, kWorld };
 
     struct Settings {
         InputSourceType inputSource{InputSourceType::kUnknown};
-        InjectionMode injectionMode{InjectionMode::kFreeRotation};
         std::string logLevel{"info"};
 
         std::string steamApiPath;
 
-        float sensitivity{1.0F};
+        GyroData gyroData{GyroData::kQuat};
+        GyroSpace gyroSpace{GyroSpace::kPlayer};
+        bool calibration{true};
+        float yawRelaxFactor{1.41F};
+
+        float yawSensitivity{0.25F};
+        float pitchSensitivity{0.25F};
         GyroAxis yawAxis{GyroAxis::kY};
         GyroAxis pitchAxis{GyroAxis::kX};
         bool invertYaw{false};
         bool invertPitch{false};
-        float deadzoneDegPerSec{1.0F};
-        float smoothing{0.5F};
+        float yawDeadzoneDegPerSec{4.0F};
+        float pitchDeadzoneDegPerSec{4.0F};
+        float smoothing{0.7F};
         float pitchClampDeg{80.0F};
 
         bool enableOnBowDraw{true};

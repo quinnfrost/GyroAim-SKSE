@@ -95,9 +95,24 @@ namespace GyroAim {
             return false;
         }
 
-        InputMotionData data{};
-        _getMotionData(_self, _handle, &data);
-        a_out = GyroSample{data.rotVel[0], data.rotVel[1], data.rotVel[2]};
+        constexpr float kStandardGravity = 9.80665F;
+
+        const InputMotionData data = _getMotionData(_self, _handle);
+
+        // Steam is Z-up (X = pitch, Y = roll, Z = yaw); GamepadMotionHelpers expects
+        // Y-up (X = pitch, Y = yaw, Z = roll). Without this basis change the player-space
+        // yaw projection flips sign once the controller pitches near vertical.
+        a_out = GyroSample{data.rotVel[0],
+                           data.rotVel[2],
+                           -data.rotVel[1],
+                           data.posAccel[0] / kStandardGravity,
+                           data.posAccel[2] / kStandardGravity,
+                           -data.posAccel[1] / kStandardGravity,
+                           data.rotQuat[3],
+                           data.rotQuat[0],
+                           data.rotQuat[2],
+                           -data.rotQuat[1],
+                           true};
         return true;
     }
 }

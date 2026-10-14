@@ -84,7 +84,7 @@
 - **风险预案**：若 `GetMotionData` 因 Steam 配置不出数，先用固定测试增量证明注入通路，再回头修数据源（分层设计允许两线独立排障）。
 
 ### Phase 1.1 — 功能拓展：第一人称与骑马相机（工作量：M，含原 R3 风险）
-- 第一人称支持：`FirstPersonState` pitch 写 `targetPitchOffset`/`currentPitchOffset`（[-100,100]，需换算与钳制）+ yaw 走玩家朝向联动（写入点需逆向验证，见 §4 R3）；
+- 第一人称支持：yaw 走玩家朝向联动（`Actor::SetRotationZ`）；pitch 初版写 `FirstPersonState::targetPitchOffset`/`currentPitchOffset`（**Phase 2.1 实测修正**：offset 为每帧派生态不持久，真值是 `PlayerCharacter::data.angle.x`，上为负）；
 - 骑马相机：`HorseCameraState`（`HandleLookInput` 已在 CommonLibSSE NG 确认存在）复用增量 post 注入；
 - 激活条件沿用 D8（拉弓 / 配置常开）；按当前相机状态（第一/第三人称/骑马）自动分流注入目标；
 - **验收**：第一人称、第三人称、骑马三种状态陀螺均可转视角，右摇杆叠加同时有效，启停切换无跳变、无累积漂移。
@@ -92,15 +92,23 @@
 ### Phase 2 — 手感完善（工作量：M）
 - 接入 GamepadMotionHelpers（标定/融合/Player-Space）；
 - 数据语义：`driftCorrectedQuat` 逐帧差量为主（Steam 文档明确推荐相机用法），`rotVel` 备选（见 D5）；
+  - 实现注记（2026-10-14）：Steam V2 `driftCorrectedQuat` 截至 SDK 1.58a 无公开接口，落地时以 GMH 融合姿态 + 连续标定的逐帧差量等价实现 D5 语义；
 - 灵敏度、反转轴、死区、低通平滑、俯仰钳制（防翻转）；
 - 全部参数进配置文件；
 - **验收**：长时间瞄准无明显漂移；手感可调至接近 Switch 版体感水准（主观基准）。
 
-### Phase 3 — 多输入源（工作量：M，受 C4 约束）
-- `DsuSource`：Cemuhook UDP（覆盖 DS4Windows 用户、Steam Deck + SteamDeckGyroDSU）；
-- `HidSource`：SDL3 sensor API 或 hidapi 直读（覆盖无 Steam/裸设备）；
-- 配置项 `inputSource = steam | dsu | hid`；**启动时校验选定源，失败 → 日志明确报错 + 功能禁用，不回退**；
-- **验收**：三个源各自可用；切换配置重启生效；选错源时日志可诊断。
+### Phase 2.1 — 手感问题修复（工作量：S，2026-10-14 实测反馈新增，含二轮修正）
+- 灵敏度/抖动/静态漂移（一轮 + 二轮）：默认 `sensitivity` 逐轮下调 1.0 → 0.5 → **0.25**，`deadzoneDegPerSec` 1.0 → 2.5 → **4.0**，`smoothing` 0.5 → 0.65 → **0.7**；相关可调参数全部进配置（含 GMH 自动标定开关 `calibration`）；
+- 视角反向排查（一轮）：根因为 Steam 运动数据为 Z-up（X = pitch, Y = roll, Z = yaw），与 GamepadMotionHelpers 的 Y-up（X = pitch, Y = yaw, Z = roll）约定不一致——平视时重力投影恰好自洽，俯仰接近垂直时玩家空间 yaw 的符号翻转导致左右反向；修复为在 Steam 源输出端做轴空间转换；
+- 激活时机（一轮）：拉弓判定从 `== kBowDrawn` 改为 `kBowDraw..kBowNextAttack` 范围（扣下扳机即触发，与 IC/CMC 验证过的 OAR-proof 判定一致）；
+- 第一人称修正（二轮）：yaw 实测与第三人称**反号**（增量改减）；pitch 写入点从 `targetPitchOffset`/`currentPitchOffset` 改为 **`PlayerCharacter::data.angle.x`**——offset 是引擎每帧从玩家俯仰派生的中间态（写入不持久，实测无效），`data.angle.x` 为第一人称俯仰真值且**上为负**（由 ImprovedCameraSE-NG 的 look-pitch 钳制源码实证）；
+- 轴使用确认（二轮）：全程仅 **yaw + pitch 两个轴**作用于相机——任何注入路径都不写 roll；roll 分量只在 GMH 玩家空间投影内部作为 yaw 的几何输入参与（倾斜持握所需），不产生相机横滚；
+- 第三人称 yaw 注入目标切换（三轮）：SmoothCam 源码实证 `UpdateRotation()` 按 `freeRotationEnabled` 门控——`freeRotation.x` 仅自由视角模式生效，武器拔出/瞄准态被丢弃或重置，统一解释"下视反向/快速旋转回拉/大俯仰受限"三症状；默认 `injectionMode` 切为 **`yawPitch`**（`targetYaw`/`currentYaw` 无条件被消费），`freeRotation` 模式保留可选；
+- 分轴配置（三轮）：灵敏度与死区各自拆分为水平/垂直两项（`yawSensitivity`/`pitchSensitivity`、`yawDeadzoneDegPerSec`/`pitchDeadzoneDegPerSec`）；
+- 第三人称准星修复（四轮）：`yawPitch`（写 `targetYaw`/`currentYaw`）实测为自由镜头——瞄准态准星跟随**玩家朝向**，只转相机角色不转。默认注入改为 `injectionMode = player`（yaw → `Actor::SetRotationZ` 转玩家本体、与 FP 同符号，pitch → `freeRotation.y`）；`freeRotation` 模式仅留档；旧值 `yawPitch` 自动映射为 `player`；
+- 运动学可观测日志（四轮）：`logLevel = debug` 每秒输出 `motion accelMag/grav/out`，用于实测定案 posAccel 单位（9.8 = m/s²，1.0 = g）与重力估计质量（静止应 ≈ (0,-1,0)），以及死区前原始输出的漂移/滚转串扰；
+- **回滚**（五轮，2026-10-14）：四轮 `player` 与三轮 `yawPitch` 注入均未通过实测（自由镜头/准星不随动/滚转驱动），整体**回滚至严重问题前的二轮基线**——第三人称恢复 `freeRotation` 增量，退役 `injectionMode`（遗留 ini 值忽略）；保留分轴配置与 debug 日志（行为无关）；"水平由滚转驱动"为回滚后仍开放的排查项，依赖 debug 运动学日志定案；
+- **验收**：回滚后行为与二轮一致（第一人称垂直/水平可用、第三人称基本手感）；开放项：水平滚转串扰根因、静态漂移。
 
 ### Phase 4 — 功能扩展（工作量：M~L）
 - 激活条件扩展：弩、法术蓄力、蹲伏、按键 Toggle/Hold（配置化）；
@@ -112,6 +120,12 @@
 - 文档：安装、Steam 配置要求（**Gyro Behavior 设为 None**，避免与插件叠加出双倍视角）、配置项说明、已知不兼容列表；
 - 运行时覆盖：SE 1.5.97 + AE 1.6.x + GOG（CommonLibSSE NG `RELOCATION_ID(SE,AE)` 双值 + REL 抽象），VR 明确不支持；
 - **验收**：干净 MO2 环境 + 典型整合包环境各跑通一遍。
+
+### Phase 3 — 多输入源（工作量：M，受 C4 约束）——**调整至末位，暂不计划实现（2026-10-14）**
+- `DsuSource`：Cemuhook UDP（覆盖 DS4Windows 用户、Steam Deck + SteamDeckGyroDSU）；
+- `HidSource`：SDL3 sensor API 或 hidapi 直读（覆盖无 Steam/裸设备）；
+- 配置项 `inputSource = steam | dsu | hid`；**启动时校验选定源，失败 → 日志明确报错 + 功能禁用，不回退**；
+- **验收**：三个源各自可用；切换配置重启生效；选错源时日志可诊断。
 
 ---
 
@@ -182,7 +196,7 @@
 | D5 | 陀螺数据语义 | **`driftCorrectedQuat` 逐帧差量**为主（Steam 文档明确推荐相机用法），`rotVel` 角速度备选 |
 | D6 | MVP 范围 | **不含第一人称/骑马**（R3 未逆向验证，移至 Phase 1.1 专项处理） |
 | D7 | 目标运行时 | **SE 1.5.97 + AE 1.6.x + GOG**（CommonLibSSE NG REL/`RELOCATION_ID(SE,AE)` 一次抽象全覆盖）；**VR 不支持** |
-| D8 | 默认激活条件 | **MVP 仅拉弓**（`GetAttackState() == kBowDrawn`）；Phase 4 配置化扩展（弩/法术蓄力/蹲伏/按键 Toggle） |
+| D8 | 默认激活条件 | **MVP 仅拉弓**（`GetAttackState() == kBowDrawn`）；Phase 4 配置化扩展（弩/法术蓄力/蹲伏/按键 Toggle）；Phase 2.1 起改为 `kBowDraw..kBowNextAttack` 范围（扣下扳机即触发） |
 
 ## 7. 调研遗留未验证项（排期进对应 Phase）
 - `InputMotionDataV2_t` 访问器确切名称（P1 开工时核对 Steamworks SDK 头）；
@@ -215,7 +229,7 @@ cmake --preset debug && cmake --build build/debug
 |---|---|
 | 拉弓检测 | `RE::ActorState::GetAttackState()`、`WEAPON_STATE_ENUM::kBowDrawn = 10`（`RE/A/ActorState.h`）；辅以 `IsWeaponDrawn()` |
 | 第三人称注入目标 | `RE::ThirdPersonState`（`RE/T/ThirdPersonState.h`）：`HandleLookInput(const NiPoint2&)`、`UpdateRotation()`、`targetYaw`/`currentYaw`（弧度）、`freeRotation.x/y`（NiPoint2，疑似 yaw/pitch）、`rotation`（NiQuaternion）；拉弓态下哪组字段生效是 Phase 1 RE 验证点 |
-| 第一人称（Phase 1.1） | `RE::FirstPersonState`（`RE/F/FirstPersonState.h`）：`targetPitchOffset`/`currentPitchOffset`（[-100,100]）+ 玩家 yaw 联动 |
+| 第一人称（Phase 1.1，2.1 修正） | yaw：`Actor::SetRotationZ`（与第三人称反号）；pitch：`PlayerCharacter::data.angle.x`（上为负，±89° 钳制；`targetPitchOffset` 为派生态已弃用） |
 | 骑马（Phase 1.1） | `RE::HorseCameraState::HandleLookInput`（存在，已确认） |
 | 帧驱动 / 相机 hook | 虚表 `RE::VTABLE_TESCameraState` 写 `Update`（detour 前后调用原函数，**增量注入放 post 阶段**）；或 SKSE 事件 sink 轮询（MVP 可先用 sink，稳定后换 detour） |
 | 输入层参考 hook（fallback 用） | TDM `Hooks.h`：`LookHandler` vfunc 0x2 `ProcessThumbstick`/0x3 `ProcessMouseMove`（AE 1.6+ 需 +2 vtblShift）；摇杆整形 call-site `RELOCATION_ID(67497, 68808)` + 0x13F 处 `write_call`，签名 `ProcessInput(BSWin32GamepadDevice*, rawX, rawY, deadzoneMin, deadzoneMax, outX, outY)` |
@@ -237,4 +251,4 @@ cmake --preset debug && cmake --build build/debug
 1. Phase 0：改名 `GyroAim`、日志、INI 读取骨架、帧心跳（验收：`/W4` 零警告 + 游戏内日志输出 `GetAttackState()`）；
 2. Phase 1：SteamInputSource 取数 + 相机层固定测试增量注入 + 拉弓触发 + 右摇杆叠加验证（验收：拉弓手腕转动能转视角，摇杆同时可用）；
 3. Phase 1.1：第一人称与骑马相机注入分流（验收：三种相机状态均可转视角、启停无跳变）；
-4. 之后严格按 §2 的 Phase 2→5 顺序走，每阶段过完验收再进下一阶段。
+4. 之后按 §2 顺序走 Phase 2 → 2.1 → 4 → 5，每阶段过完验收再进下一阶段；Phase 3（多输入源）已移至末位，暂不计划实现。

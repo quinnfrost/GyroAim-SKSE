@@ -17,18 +17,20 @@ namespace GyroAim {
         [[nodiscard]] const char* Name() const override { return "steam"; }
 
     private:
-        // Matches Steamworks InputMotionData_t (stable since SDK 1.44).
+        // Matches Steamworks InputMotionData_t (stable since SDK 1.44). The flat API
+        // returns it by value, which on x64 compiles to a hidden sret pointer - the
+        // signature must mirror that exactly.
         struct InputMotionData {
-            float rotQuat[4];
-            float posAccel[3];
-            float rotVel[3];
+            float rotQuat[4];   // X, Y, Z, W
+            float posAccel[3];  // m/s^2
+            float rotVel[3];    // deg/s
         };
 
         using SteamInputFn = void* (*)();
         using InitFn = bool (*)(void*, bool);
         using RunFrameFn = bool (*)(void*, bool);
         using GetConnectedControllersFn = std::int32_t (*)(void*, std::uint64_t*);
-        using GetMotionDataFn = void (*)(void*, std::uint64_t, InputMotionData*);
+        using GetMotionDataFn = InputMotionData (*)(void*, std::uint64_t);
 
         [[nodiscard]] void* Resolve(const char* a_symbol) const;
 
