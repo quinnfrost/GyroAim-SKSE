@@ -1,0 +1,12 @@
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -485,7 +485,8 @@ inline auto get_data(Container& c) -> typename Container::value_type* {
+   return c.data();
+ }
+ 
+-#if defined(_SECURE_SCL) && _SECURE_SCL
++#if 0  // stdext::checked_array_iterator was removed from the MSVC STL
++       // (MSVC 14.42+/VS 2022 17.13+); always use the raw-pointer fallback.
+ // Make a checked iterator to avoid MSVC warnings.
+ template <typename T> using checked_ptr = stdext::checked_array_iterator<T*>;
+ template <typename T>

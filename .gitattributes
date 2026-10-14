@@ -1,0 +1,3 @@
+# vcpkg overlay patches are applied by git apply and must stay LF even with
+# autocrlf enabled, otherwise patch application fails on fresh checkouts.
+*.patch text eol=lf
