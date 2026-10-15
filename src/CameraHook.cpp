@@ -28,8 +28,9 @@ namespace GyroAim::CameraHook {
             GyroManager::GetSingleton()->OnFirstPersonUpdate(static_cast<RE::FirstPersonState*>(a_self));
         }
 
-        // HorseCameraState derives ThirdPersonState without overriding Update, so its vtable
-        // slot points at ThirdPersonState::Update and the third-person field logic applies.
+        // HorseCameraState derives ThirdPersonState without overriding Update, so its
+        // vtable slot points at ThirdPersonState::Update. GyroManager routes it to the
+        // mounted aim injection (horse heading + rider pitch), not the TP fields.
         void HorseCameraUpdate(RE::TESCameraState* a_self, RE::BSTSmartPointer<RE::TESCameraState>& a_nextState) {
             _OriginalHorseCameraUpdate(a_self, a_nextState);
             GyroManager::GetSingleton()->OnHorseCameraUpdate(static_cast<RE::HorseCameraState*>(a_self));

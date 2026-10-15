@@ -22,8 +22,8 @@ namespace GyroAim {
         // signature must mirror that exactly.
         struct InputMotionData {
             float rotQuat[4];   // X, Y, Z, W
-            float posAccel[3];  // m/s^2
-            float rotVel[3];    // deg/s
+            float posAccel[3];  // raw: -SHRT_MAX..SHRT_MAX = -2G..+2G
+            float rotVel[3];    // raw: -SHRT_MAX..SHRT_MAX = -2000..+2000 deg/s
         };
 
         using SteamInputFn = void* (*)();

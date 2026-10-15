@@ -95,19 +95,27 @@ namespace GyroAim {
             return false;
         }
 
-        constexpr float kStandardGravity = 9.80665F;
+        // InputMotionData_t carries raw int16-range values: -SHRT_MAX..SHRT_MAX maps to
+        // -2000..+2000 deg/s (rotVel) and -2G..+2G (posAccel). GamepadMotionHelpers wants
+        // deg/s and g. Feeding it raw magnitudes inflates the gravity vector ~1670x, which
+        // saturates CalculatePlayerSpaceGyro's min() clamp and lets roll drive the yaw axis.
+        constexpr float kRawScale = 32767.0F;  // SHRT_MAX
+        constexpr float kRotVelMaxDegPerSec = 2000.0F;
+        constexpr float kAccelMaxG = 2.0F;
+        const float rotVelScale = kRotVelMaxDegPerSec / kRawScale;
+        const float accelScale = kAccelMaxG / kRawScale;
 
         const InputMotionData data = _getMotionData(_self, _handle);
 
         // Steam is Z-up (X = pitch, Y = roll, Z = yaw); GamepadMotionHelpers expects
         // Y-up (X = pitch, Y = yaw, Z = roll). Without this basis change the player-space
         // yaw projection flips sign once the controller pitches near vertical.
-        a_out = GyroSample{data.rotVel[0],
-                           data.rotVel[2],
-                           -data.rotVel[1],
-                           data.posAccel[0] / kStandardGravity,
-                           data.posAccel[2] / kStandardGravity,
-                           -data.posAccel[1] / kStandardGravity,
+        a_out = GyroSample{data.rotVel[0] * rotVelScale,
+                           data.rotVel[2] * rotVelScale,
+                           -data.rotVel[1] * rotVelScale,
+                           data.posAccel[0] * accelScale,
+                           data.posAccel[2] * accelScale,
+                           -data.posAccel[1] * accelScale,
                            data.rotQuat[3],
                            data.rotQuat[0],
                            data.rotQuat[2],

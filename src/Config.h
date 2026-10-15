@@ -22,7 +22,7 @@ namespace GyroAim {
         float yawRelaxFactor{1.41F};
 
         float yawSensitivity{0.25F};
-        float pitchSensitivity{0.25F};
+        float pitchSensitivity{0.1875F};
         GyroAxis yawAxis{GyroAxis::kY};
         GyroAxis pitchAxis{GyroAxis::kX};
         bool invertYaw{false};

@@ -41,6 +41,7 @@ namespace GyroAim {
         void LogHeartbeat(RE::TESCameraState* a_state, TimePoint a_now);
         void ApplyToThirdPerson(RE::ThirdPersonState* a_state, const FrameDelta& a_delta);
         void ApplyToFirstPerson(const FrameDelta& a_delta);
+        void ApplyToHorse(RE::HorseCameraState* a_state, const FrameDelta& a_delta);
 
         IGyroSource* _source{nullptr};
 

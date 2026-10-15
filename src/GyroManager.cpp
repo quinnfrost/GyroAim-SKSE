@@ -7,6 +7,7 @@ namespace GyroAim {
     namespace {
         constexpr float kDegToRad = 0.017453292519943295F;
         constexpr float kRadToDeg = 57.29577951308232F;
+        constexpr float kMaxPitch = 1.5533F;  // 89 degrees
 
         [[nodiscard]] float AxisValue(float a_x, float a_y, float a_z, GyroAxis a_axis) {
             switch (a_axis) {
@@ -37,11 +38,17 @@ namespace GyroAim {
     void GyroManager::Initialize() {
         const auto& settings = Config::GetSingleton()->GetSettings();
 
-        // Stillness-based drift compensation; can be disabled from the config.
+        // Drift compensation via GMH auto-calibration (stillness + sensor-fusion bias
+        // tracking); can be disabled from the config. The Start/Pause*Calibration API is
+        // the manual "calibrate now" window: it averages every sample -- including real
+        // aiming rotations -- into the bias and disables auto-calibration, so it must not
+        // run during gameplay.
+        _motion.ResetContinuousCalibration();
         if (settings.calibration) {
-            _motion.StartContinuousCalibration();
+            _motion.SetCalibrationMode(GamepadMotionHelpers::CalibrationMode::Stillness |
+                                       GamepadMotionHelpers::CalibrationMode::SensorFusion);
         } else {
-            _motion.PauseContinuousCalibration();
+            _motion.SetCalibrationMode(GamepadMotionHelpers::CalibrationMode::Manual);
         }
 
         const auto inputSource = settings.inputSource;
@@ -113,9 +120,10 @@ namespace GyroAim {
         SKSE::log::info("heartbeat camera={} attackState={} bowAiming={} gyro={}"sv, CameraStateName(cameraId),
                         attackState, IsBowAiming(), _source != nullptr);
 
-        // Ground truth for drift/axis investigations: accelMag ~9.8 => Steam posAccel is
-        // m/s^2 (current conversion correct), ~1.0 => already g. grav should be ~ (0,-1,0)
-        // at rest on a flat surface.
+        // Ground truth for drift/axis investigations: after the raw-scale conversion,
+        // accelMag should read ~1.0 (g) at rest; grav should be ~ (0,-1,0) at rest on a
+        // flat surface. A large accelMag or off-axis grav means the unit conversion or
+        // gravity estimation regressed (roll leaking into yaw / sign flips).
         float gravX, gravY, gravZ;
         _motion.GetGravity(gravX, gravY, gravZ);
         SKSE::log::debug("motion accelMag={:.2f} grav=({:.2f}, {:.2f}, {:.2f}) out=({:.3f}, {:.3f}) deg/frame"sv,
@@ -271,8 +279,16 @@ namespace GyroAim {
     }
 
     void GyroManager::OnHorseCameraUpdate(RE::HorseCameraState* a_state) {
-        // HorseCameraState extends ThirdPersonState; the injection targets are identical.
-        OnThirdPersonUpdate(a_state);
+        const auto now = std::chrono::steady_clock::now();
+        LogHeartbeat(a_state, now);
+
+        FrameDelta delta;
+        if (!ComputeFrameDelta(Tick(now), delta)) {
+            return;
+        }
+        ApplyToHorse(a_state, delta);
+        SKSE::log::debug("horse inject yaw={:.4f} pitch={:.4f} heading={:.3f}"sv, delta.yaw, delta.pitch,
+                         a_state->horseCurrentDirection);
     }
 
     void GyroManager::OnFirstPersonUpdate(RE::FirstPersonState* a_state) {
@@ -294,13 +310,13 @@ namespace GyroAim {
         // targetYaw- and player-heading-based modes were retired after field testing
         // (free-camera artifact / crosshair mismatch). Red line 3: increments only,
         // applied after the original Update ran.
-        a_state->freeRotation.x += a_delta.yaw;
+        // 2026-10-15: yaw direction is inverted relative to the player-heading
+        // fields (FP subtracts and is correct), so freeRotation.x subtracts too.
+        a_state->freeRotation.x -= a_delta.yaw;
         a_state->freeRotation.y += a_delta.pitch;
     }
 
     void GyroManager::ApplyToFirstPerson(const FrameDelta& a_delta) {
-        constexpr float kMaxPitch = 1.5533F;  // 89 degrees
-
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
             return;
@@ -313,6 +329,29 @@ namespace GyroAim {
         // FP look pitch lives in data.angle.x (up is negative, verified against
         // ImprovedCameraSE-NG's look-pitch clamps). FirstPersonState's pitch offsets are
         // re-derived from it every update, so writing them does not persist.
+        player->SetRotationX(std::clamp(player->data.angle.x - a_delta.pitch, -kMaxPitch, kMaxPitch));
+    }
+
+    void GyroManager::ApplyToHorse(RE::HorseCameraState* a_state, const FrameDelta& a_delta) {
+        // The mounted camera is an orbit rig around the horse (camera yaw = horse heading
+        // + freeRotation.x, camera pitch = -freeRotation.y; TDM's HorseCameraState
+        // ::UpdateRotation source). freeRotation increments therefore only swing the view
+        // ("视角") while the crosshair/aim -- horse heading plus rider pitch -- stays put.
+        // Drive the aim like the first-person path instead: horse heading for yaw, rider
+        // pitch (data.angle.x) for pitch; both follow the FP sign convention.
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            return;
+        }
+
+        RE::Actor* horse =
+            a_state->horseRefHandle ? static_cast<RE::Actor*>(a_state->horseRefHandle.get().get()) : nullptr;
+        if (horse) {
+            horse->SetRotationZ(horse->data.angle.z - a_delta.yaw);
+            // Keep the camera's heading anchor on the horse so the view turns with it.
+            a_state->horseCurrentDirection = horse->GetHeading(false);
+        }
+
         player->SetRotationX(std::clamp(player->data.angle.x - a_delta.pitch, -kMaxPitch, kMaxPitch));
     }
 }

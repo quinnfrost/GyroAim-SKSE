@@ -50,26 +50,32 @@ namespace GyroAim {
         }
 
         void WriteDefaults(const std::filesystem::path& a_path) {
+            // Comments must be full comment lines ("; ..."), attached at first creation.
             CSimpleIniW ini;
             ini.SetUnicode();
-            ini.SetValue(L"General", L"inputSource", L"steam");
-            ini.SetValue(L"General", L"logLevel", L"info");
-            ini.SetValue(L"Steam", L"steamApiPath", L"");
-            ini.SetValue(L"Gyro", L"gyroData", L"quat");
-            ini.SetValue(L"Gyro", L"gyroSpace", L"player");
-            ini.SetValue(L"Gyro", L"calibration", L"true");
-            ini.SetValue(L"Gyro", L"yawRelaxFactor", L"1.41");
-            ini.SetValue(L"Gyro", L"yawSensitivity", L"0.25");
-            ini.SetValue(L"Gyro", L"pitchSensitivity", L"0.25");
-            ini.SetValue(L"Gyro", L"yawAxis", L"y");
-            ini.SetValue(L"Gyro", L"pitchAxis", L"x");
-            ini.SetValue(L"Gyro", L"invertYaw", L"false");
-            ini.SetValue(L"Gyro", L"invertPitch", L"false");
-            ini.SetValue(L"Gyro", L"yawDeadzoneDegPerSec", L"4.0");
-            ini.SetValue(L"Gyro", L"pitchDeadzoneDegPerSec", L"4.0");
-            ini.SetValue(L"Gyro", L"smoothing", L"0.7");
-            ini.SetValue(L"Gyro", L"pitchClampDeg", L"80.0");
-            ini.SetValue(L"Activation", L"enableOnBowDraw", L"true");
+            ini.SetValue(L"General", nullptr, nullptr, L"; GyroAim config. Delete this file to regenerate defaults.");
+            ini.SetValue(L"General", L"inputSource", L"steam", L"; gyro input source: steam (dsu/hid planned)");
+            ini.SetValue(L"General", L"logLevel", L"info", L"; trace | debug | info | warn | error");
+            ini.SetValue(L"Steam", nullptr, nullptr, L"; settings for inputSource = steam");
+            ini.SetValue(L"Steam", L"steamApiPath", L"", L"; steam_api64.dll path; empty = normal DLL search order");
+            ini.SetValue(L"Gyro", nullptr, nullptr, L"; sensor data pipeline");
+            ini.SetValue(L"Gyro", L"gyroData", L"quat", L"; quat = fused-orientation frame diff (default) | rotVel");
+            ini.SetValue(L"Gyro", L"gyroSpace", L"player", L"; projection space: player | world | local");
+            ini.SetValue(L"Gyro", L"calibration", L"true", L"; GMH stillness auto-calibration (drift compensation)");
+            ini.SetValue(L"Gyro", L"yawRelaxFactor", L"1.41", L"; player-space yaw relax factor (GMH default)");
+            ini.SetValue(L"Gyro", L"yawAxis", L"y", L"; local space only: yaw axis (x | y | z)");
+            ini.SetValue(L"Gyro", L"pitchAxis", L"x", L"; local space only: pitch axis (x | y | z)");
+            ini.SetValue(L"Feel", nullptr, nullptr, L"; per-axis feel tuning (horizontal and vertical are independent)");
+            ini.SetValue(L"Feel", L"yawSensitivity", L"0.25", L"; horizontal sensitivity");
+            ini.SetValue(L"Feel", L"pitchSensitivity", L"0.1875", L"; vertical sensitivity");
+            ini.SetValue(L"Feel", L"invertYaw", L"false", L"; reverse horizontal direction");
+            ini.SetValue(L"Feel", L"invertPitch", L"false", L"; reverse vertical direction");
+            ini.SetValue(L"Feel", L"yawDeadzoneDegPerSec", L"4.0", L"; horizontal deadzone (deg/s)");
+            ini.SetValue(L"Feel", L"pitchDeadzoneDegPerSec", L"4.0", L"; vertical deadzone (deg/s)");
+            ini.SetValue(L"Feel", L"smoothing", L"0.7", L"; low-pass smoothing 0..1 (higher = smoother)");
+            ini.SetValue(L"Feel", L"pitchClampDeg", L"80.0", L"; accumulated pitch clamp from enable point (anti-flip)");
+            ini.SetValue(L"Activation", nullptr, nullptr, L"; when the gyro takes over the camera");
+            ini.SetValue(L"Activation", L"enableOnBowDraw", L"true", L"; true = while drawing a bow; false = always on");
             if (ini.SaveFile(a_path.wstring().c_str()) < 0) {
                 SKSE::log::warn("could not write default config to {}"sv, a_path.string());
             } else {
@@ -136,16 +142,17 @@ namespace GyroAim {
 
         _settings.calibration = getBool(L"Gyro", L"calibration", true);
         _settings.yawRelaxFactor = getFloat(L"Gyro", L"yawRelaxFactor", 1.41F);
-        _settings.yawSensitivity = getFloat(L"Gyro", L"yawSensitivity", 0.25F);
-        _settings.pitchSensitivity = getFloat(L"Gyro", L"pitchSensitivity", 0.25F);
         _settings.yawAxis = ParseAxis(getString(L"Gyro", L"yawAxis", L"y"));
         _settings.pitchAxis = ParseAxis(getString(L"Gyro", L"pitchAxis", L"x"));
-        _settings.invertYaw = getBool(L"Gyro", L"invertYaw", false);
-        _settings.invertPitch = getBool(L"Gyro", L"invertPitch", false);
-        _settings.yawDeadzoneDegPerSec = getFloat(L"Gyro", L"yawDeadzoneDegPerSec", 4.0F);
-        _settings.pitchDeadzoneDegPerSec = getFloat(L"Gyro", L"pitchDeadzoneDegPerSec", 4.0F);
-        _settings.smoothing = std::clamp(getFloat(L"Gyro", L"smoothing", 0.7F), 0.0F, 1.0F);
-        _settings.pitchClampDeg = getFloat(L"Gyro", L"pitchClampDeg", 80.0F);
+
+        _settings.yawSensitivity = getFloat(L"Feel", L"yawSensitivity", 0.25F);
+        _settings.pitchSensitivity = getFloat(L"Feel", L"pitchSensitivity", 0.1875F);
+        _settings.invertYaw = getBool(L"Feel", L"invertYaw", false);
+        _settings.invertPitch = getBool(L"Feel", L"invertPitch", false);
+        _settings.yawDeadzoneDegPerSec = getFloat(L"Feel", L"yawDeadzoneDegPerSec", 4.0F);
+        _settings.pitchDeadzoneDegPerSec = getFloat(L"Feel", L"pitchDeadzoneDegPerSec", 4.0F);
+        _settings.smoothing = std::clamp(getFloat(L"Feel", L"smoothing", 0.7F), 0.0F, 1.0F);
+        _settings.pitchClampDeg = getFloat(L"Feel", L"pitchClampDeg", 80.0F);
 
         _settings.enableOnBowDraw = getBool(L"Activation", L"enableOnBowDraw", true);
 

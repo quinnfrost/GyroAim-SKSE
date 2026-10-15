@@ -108,7 +108,9 @@
 - 第三人称准星修复（四轮）：`yawPitch`（写 `targetYaw`/`currentYaw`）实测为自由镜头——瞄准态准星跟随**玩家朝向**，只转相机角色不转。默认注入改为 `injectionMode = player`（yaw → `Actor::SetRotationZ` 转玩家本体、与 FP 同符号，pitch → `freeRotation.y`）；`freeRotation` 模式仅留档；旧值 `yawPitch` 自动映射为 `player`；
 - 运动学可观测日志（四轮）：`logLevel = debug` 每秒输出 `motion accelMag/grav/out`，用于实测定案 posAccel 单位（9.8 = m/s²，1.0 = g）与重力估计质量（静止应 ≈ (0,-1,0)），以及死区前原始输出的漂移/滚转串扰；
 - **回滚**（五轮，2026-10-14）：四轮 `player` 与三轮 `yawPitch` 注入均未通过实测（自由镜头/准星不随动/滚转驱动），整体**回滚至严重问题前的二轮基线**——第三人称恢复 `freeRotation` 增量，退役 `injectionMode`（遗留 ini 值忽略）；保留分轴配置与 debug 日志（行为无关）；"水平由滚转驱动"为回滚后仍开放的排查项，依赖 debug 运动学日志定案；
-- **验收**：回滚后行为与二轮一致（第一人称垂直/水平可用、第三人称基本手感）；开放项：水平滚转串扰根因、静态漂移。
+- **开放项根因定案**（六轮，2026-10-15，代码审查 + Steamworks SDK 注释实证）：两个开放项同源于**数据单位与标定 API 误用**——(a) `InputMotionData_t` 为 ±SHRT_MAX 原始量程（`posAccel`↔±2G、`rotVel`↔±2000°/s，SDK 注释明确），此前按 m/s²÷9.8、°/s 直通 → GMH 重力向量长度 ≈1670 → `CalculatePlayerSpaceGyro` 的 `min(|worldYaw|·relax, |gyroYZ|)` 永久饱和为 `|gyroYZ|`，滚转以满幅混入水平轴、符号由投影点积决定、俯仰过零（越过水平面）时滚转分量符号翻转——精确复现"滚转驱动水平 + 越过水平面反向"；(b) `StartContinuousCalibration()` 是 GMH 的手动标定窗口（把所有真实转动累进偏置均值并禁用静止/传感器融合自动标定），误当"持续漂移补偿"常开 → 静止漂移。修复：源内换算为 deg/s + g（`2000/32767`、`2/32767`），标定改用 `SetCalibrationMode(Stillness | SensorFusion)`；轴空间转换（Z-up→Y-up）经推导确认正确、保留不动；
+- **验收**：回滚后行为与二轮一致（第一人称垂直/水平可用、第三人称基本手感）；六轮修复后待真机复测：静止无漂移、水平由偏航驱动、越过水平面不反向（复测时 `accelMag≈1.0`、`grav≈(0,-1,0)`）；
+- **六轮复测通过 + 七轮微调**（2026-10-15）：真机确认静止无漂移、水平/垂直正常、灵敏度合理。遗留三项已修：(a) 垂直灵敏度默认 0.25 → **0.1875**（`[Feel]` 分轴独立调节，水平/垂直灵敏度、死区、反向均可分开设置）；(b) 第三人称水平反向——`freeRotation.x` 增量改减（FP 的 `SetRotationZ` 约定为正解）；(c) 骑马"只转视角不转准星、垂直不动"——TDM `HorseCameraState::UpdateRotation` 源码实证骑马相机为绕马轨道（yaw = 马头朝向 + `freeRotation.x`、pitch = `-freeRotation.y`），`freeRotation` 写入只动轨道视角；改为**瞄准注入**：yaw → `horse->SetRotationZ`（马头，同步 `horseCurrentDirection` 使镜头随动），pitch → `player->data.angle.x`（骑手瞄准俯仰，同 FP）。配置文件同步重组（`[General]/[Steam]/[Gyro]/[Feel]/[Activation]` + 每键一行注释，不兼容旧布局，测试时删 ini 重生成）。待复测：骑马准星是否随陀螺转动、马行进中马头写入是否被运动系统覆盖（若被覆盖则降级为 `horseCurrentDirection` 驱动或 patch 化）。
 
 ### Phase 4 — 功能扩展（工作量：M~L）
 - 激活条件扩展：弩、法术蓄力、蹲伏、按键 Toggle/Hold（配置化）；
