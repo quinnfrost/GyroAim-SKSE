@@ -278,17 +278,50 @@ namespace GyroAim {
                          a_state->freeRotation.x, a_state->freeRotation.y);
     }
 
-    void GyroManager::OnHorseCameraUpdate(RE::HorseCameraState* a_state) {
+    float GyroManager::OnHorseLookInputPhase(RE::HorseCameraState* a_state) {
         const auto now = std::chrono::steady_clock::now();
         LogHeartbeat(a_state, now);
 
         FrameDelta delta;
         if (!ComputeFrameDelta(Tick(now), delta)) {
-            return;
+            _hasHorseDelta = false;
+            return 0.0F;
         }
-        ApplyToHorse(a_state, delta);
-        SKSE::log::debug("horse inject yaw={:.4f} pitch={:.4f} heading={:.3f}"sv, delta.yaw, delta.pitch,
-                         a_state->horseCurrentDirection);
+        _horseDelta = delta;
+        _hasHorseDelta = true;
+
+        // Mounted-aim pitch carrier, proven from the round-15/16 logs: while aiming,
+        // stick y maps to the RIDER pitch (data.angle.x) at -0.1 rad per input unit and
+        // that is what moves the crosshair; both earlier rider writes (round 7) missed
+        // the input-phase consumption this hook runs in. Write it here, at input phase,
+        // with the exact expression the verified first-person path uses (up is negative).
+        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+            player->SetRotationX(std::clamp(player->data.angle.x - delta.pitch, -kMaxPitch, kMaxPitch));
+        }
+
+        // Stick-magnitude contribution for the forwarded argument (redundant; the
+        // engine's canonical read ignored it in round 15-16, kept as defense in depth).
+        return delta.pitch * Config::GetSingleton()->GetSettings().horseLookScale;
+    }
+
+    void GyroManager::OnHorseCameraUpdate(RE::HorseCameraState* a_state) {
+        // Pre/post snapshot of every candidate field: if the pre values of the next
+        // frame do not carry this frame's post values, another mod is overwriting them.
+        const float preFreeX = a_state->freeRotation.x;
+        const float preFreeY = a_state->freeRotation.y;
+        const auto* player = RE::PlayerCharacter::GetSingleton();
+        const float prePlayerPitch = player ? player->data.angle.x : 0.0F;
+        const auto* camera = RE::PlayerCamera::GetSingleton();
+        const float preRotInputY = camera ? camera->rotationInput.y : 0.0F;
+
+        if (_hasHorseDelta) {
+            ApplyToHorse(a_state, _horseDelta);
+        }
+        SKSE::log::debug(
+            "horse inject yaw={:.4f} pitch={:.4f} freeRot=({:.4f},{:.4f})->({:.4f},{:.4f}) playerPitch={:.4f}->{:.4f} rotInY={:.4f}->{:.4f}"sv,
+            _horseDelta.yaw, _horseDelta.pitch, preFreeX, preFreeY, a_state->freeRotation.x, a_state->freeRotation.y,
+            prePlayerPitch, player ? player->data.angle.x : 0.0F, preRotInputY,
+            camera ? camera->rotationInput.y : 0.0F);
     }
 
     void GyroManager::OnFirstPersonUpdate(RE::FirstPersonState* a_state) {
@@ -333,25 +366,20 @@ namespace GyroAim {
     }
 
     void GyroManager::ApplyToHorse(RE::HorseCameraState* a_state, const FrameDelta& a_delta) {
-        // The mounted camera is an orbit rig around the horse (camera yaw = horse heading
-        // + freeRotation.x, camera pitch = -freeRotation.y; TDM's HorseCameraState
-        // ::UpdateRotation source). freeRotation increments therefore only swing the view
-        // ("视角") while the crosshair/aim -- horse heading plus rider pitch -- stays put.
-        // Drive the aim like the first-person path instead: horse heading for yaw, rider
-        // pitch (data.angle.x) for pitch; both follow the FP sign convention.
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (!player) {
-            return;
-        }
-
+        // yaw: steer the horse heading (the mounted aim direction); the camera anchor
+        // follows so the view and crosshair turn with it. Applied after the original
+        // Update so the horse's own movement processing cannot overwrite it this frame.
         RE::Actor* horse =
             a_state->horseRefHandle ? static_cast<RE::Actor*>(a_state->horseRefHandle.get().get()) : nullptr;
         if (horse) {
             horse->SetRotationZ(horse->data.angle.z - a_delta.yaw);
-            // Keep the camera's heading anchor on the horse so the view turns with it.
             a_state->horseCurrentDirection = horse->GetHeading(false);
         }
 
-        player->SetRotationX(std::clamp(player->data.angle.x - a_delta.pitch, -kMaxPitch, kMaxPitch));
+        // pitch: no direct field write -- the engine consumes and resets freeRotation
+        // every frame here (round 11 measured: our fy.y write produced only a small
+        // orbit-position shift and was wiped, d_fy = 0/50 frames; fx is the orbit yaw
+        // offset, round 10 went horizontal). The stick-validated HandleLookInput path
+        // in OnHorseCameraPreUpdate is the pitch channel.
     }
 }

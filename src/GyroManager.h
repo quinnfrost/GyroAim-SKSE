@@ -21,6 +21,10 @@ namespace GyroAim {
         void OnThirdPersonUpdate(RE::ThirdPersonState* a_state);
         void OnFirstPersonUpdate(RE::FirstPersonState* a_state);
         void OnHorseCameraUpdate(RE::HorseCameraState* a_state);
+        // Input-phase hook point: called by the game's own HorseCameraState::HandleLookInput
+        // dispatch (camera-hook wrapper). Returns the gyro pitch contribution in look-input
+        // units to add to the game's input, or 0 when inactive.
+        float OnHorseLookInputPhase(RE::HorseCameraState* a_state);
 
     private:
         using TimePoint = std::chrono::steady_clock::time_point;
@@ -42,6 +46,12 @@ namespace GyroAim {
         void ApplyToThirdPerson(RE::ThirdPersonState* a_state, const FrameDelta& a_delta);
         void ApplyToFirstPerson(const FrameDelta& a_delta);
         void ApplyToHorse(RE::HorseCameraState* a_state, const FrameDelta& a_delta);
+
+        // Mounted injection state: the gyro sample is taken in the game's input-phase
+        // HandleLookInput dispatch (pitch rides into that call) and the heading steer
+        // runs after the original state Update.
+        FrameDelta _horseDelta{};
+        bool _hasHorseDelta{false};
 
         IGyroSource* _source{nullptr};
 

@@ -38,6 +38,7 @@ pitchAxis = x              ; 仅 local 空间生效：俯仰轴，x | y | z
 [Feel]                     ; 手感调校（水平/垂直完全独立）
 yawSensitivity = 0.25      ; 水平灵敏度
 pitchSensitivity = 0.1875  ; 垂直灵敏度（默认较水平低四分之一）
+horseLookScale = 10.0      ; 马背俯仰合成输入的摇杆量纲换算（弧度增量 × 该值 = 输入单位；复测需确认日志中 y ≈ pitch×10）
 invertYaw = false          ; 水平反向
 invertPitch = false        ; 垂直反向
 yawDeadzoneDegPerSec = 4.0     ; 水平死区（deg/s，漂移主要靠它截断）
@@ -64,13 +65,13 @@ enableOnBowDraw = true     ; true = 拉弓瞄准时启用，扣下扳机（kBowD
 | 相机状态 | yaw 写入 | pitch 写入 |
 |---|---|---|
 | 第三人称 | `freeRotation.x` 增量（**减**，2.1 七轮修正反向） | `freeRotation.y` 增量 |
-| 骑马（kMount） | `horse->SetRotationZ`（马头朝向，镜头随动） | `PlayerCharacter::data.angle.x` 增量（骑手瞄准俯仰，同 FP） |
+| 骑马（kMount） | `horse->SetRotationZ`（马头朝向，镜头随动） | `HandleLookInput` 原生视角通道（右摇杆同路径；`horseLookScale` 校准比例，负值反向） |
 | 第一人称 | `Actor::SetRotationZ` 增量，**与第三人称反号**（2.1 实测修正） | `PlayerCharacter::data.angle.x` 增量（FP 俯仰真值，**上为负**，±89° 钳制；2.1 实测修正，原 `targetPitchOffset` 为派生态已弃用） |
 
 运行时验证点（对应 plan R3）：
 
 - 第一人称 pitch 若方向相反，调 `invertPitch`（FP 与 TP 共用该开关，注意会同时翻转第三人称）；
-- 骑马是**瞄准注入**而非轨道相机注入：TDM 的 `HorseCameraState::UpdateRotation` 源码实证骑马相机为绕马轨道（相机 yaw = 马头朝向 + `freeRotation.x`、相机 pitch = `-freeRotation.y`），写 `freeRotation` 只会转"视角"、准星（马头朝向 + 骑手俯仰）不动。故 yaw 转马头（`horse->SetRotationZ`，并同步 `horseCurrentDirection` 让镜头跟随）、pitch 转骑手俯仰。
+- 骑马是**瞄准注入**而非轨道相机注入：TDM 的 `HorseCameraState::UpdateRotation` 源码实证骑马相机为绕马轨道（相机 yaw = 马头朝向 + `freeRotation.x`、相机 pitch = `-freeRotation.y`），写 `freeRotation` 只会转"视角"、准星（马头朝向 + 骑手俯仰）不动。yaw 因此转马头（`horse->SetRotationZ`，并同步 `horseCurrentDirection` 让镜头跟随）。俯仰经八轮实测确认**直接写字段无效**（`freeRotation.y` 被瞄准态门控/重置、`data.angle.x` 只带动骑手动作、镜头不动），改走 `HandleLookInput`（TDM hook 的同一入口，即右摇杆俯仰的原生通道）；`horseLookScale` 为输入单位换算（默认 10.0 = 实测 1 输入单位 ≈ 0.1 弧度/帧），配合 debug 日志的字段 pre/post 快照判定是否有 mod 覆盖写入。
 
 ## Phase 2：手感完善（GamepadMotionHelpers）
 
@@ -98,6 +99,8 @@ enableOnBowDraw = true     ; true = 拉弓瞄准时启用，扣下扳机（kBowD
 - **回滚至严重问题前版本**（五轮，2026-10-14）：第三人称注入回滚为 `freeRotation` 增量基线，退役 `injectionMode`（`yawPitch`/`player` 及其默认值全部移除，遗留 ini 值忽略）。**保留**两项与行为无关的四轮产物：分轴配置（`yawSensitivity`/`pitchSensitivity`、`yawDeadzoneDegPerSec`/`pitchDeadzoneDegPerSec`，默认值与回滚目标一致）与 debug 运动学日志（用于继续定案"水平由滚转驱动"问题）。第一人称（`data.angle.x` pitch + 反号 yaw）与回滚目标版本相同，无需变更。
 - **开放项根因定案并修复**（六轮，2026-10-15）：滚转串扰与静止漂移同源于两处确定性缺陷——(a) `InputMotionData_t` 是 ±SHRT_MAX 原始量程（`posAccel`↔±2G、`rotVel`↔±2000°/s，SDK 注释实证），误按 m/s²、°/s 直通使 GMH 重力向量放大约 1670 倍，`CalculatePlayerSpaceGyro` 的 `min()` 钳制永久饱和 → 滚转满幅混入水平轴、投影符号随俯仰过零翻转（"越过水平面反向"）；(b) `StartContinuousCalibration()` 是 GMH 手动标定窗口（真实转动被累进偏置均值）而非持续漂移补偿，误用导致静止漂移。修复：源内量纲换算（×2000/32767、×2/32767）+ 改用 `SetCalibrationMode(Stillness | SensorFusion)`。真机复测通过：水平/垂直正常、静止无漂移、灵敏度合理。
 - **七轮微调**（2026-10-15）：垂直灵敏度默认 0.25 → **0.1875**（水平/垂直全程独立可调，见 `[Feel]`）；第三人称水平反向修复（`freeRotation.x` 增量改减，与 FP 的 `SetRotationZ` 约定一致）；骑马改为**瞄准注入**（马头朝向 + 骑手俯仰，见 Phase 1.1 表）；配置文件按 `[General]/[Steam]/[Gyro]/[Feel]/[Activation]` 重组、每键一行注释，**不兼容旧布局**（升级删 ini 重生成）。
+- **八轮：骑马俯仰改走原生视角通道**（2026-10-15）：七轮骑马 pitch 双写（`freeRotation.y` + `data.angle.x`）实测仍无效——可见骑手上下动作（`data.angle.x` 生效）但准星/镜头俯仰不动，且两 DLL 产物校验为新代码，排除陈旧构建。结论：骑马瞄准态下相机俯仰不派生自这两个字段（`freeRotation` 疑被瞄准态门控/每帧重置，与三轮 SmoothCam RE 结论一致；`data.angle.x` 只驱动骑手动画）。改为调用 `HorseCameraState::HandleLookInput`（TDM hook 的同一入口 = 右摇杆俯仰的原生通道），游戏自行处理镜头/准星/动画；新增 `[Feel] horseLookScale` 校准输入单位（debug 日志含各字段 pre/post 快照，若 pre ≠ 上帧 post 即为外部 mod 覆盖，走 C2 patch 路线）。
+- **九轮：骑马俯仰单位标定定案**（2026-10-15，日志实证）：诊断构建日志（`horse look-input` hook + 字段 pre/post 快照）一次性定案——(a) `HandleLookInput` 通道正常且就是俯仰真值通道（输入→`freeRotation.y` 线性变化，骑手俯仰由引擎镜像同步 `playerPitch = -freeRot.y`，这也解释了此前直写字段无效）；(b) 输入是**摇杆量纲**而非弧度：实测 1 输入单位 ≈ **0.1 弧度/帧**（摇杆 0.17136/0.23821/0.24834 → ΔfreeRot.y 0.0172/0.0238/0.0248，比值 0.1004/0.1000/0.0999），此前把弧度增量当输入用，量级小 300~800 倍，故"完全无反应"。修复：`horseLookScale` 默认 1.0 → **10.0**（= 1/0.1），注入以校准后的摇杆量纲进原生通道，镜头速度与 FP/TP 的弧度语义一致。
 
 ## 当前范围与已知限制
 

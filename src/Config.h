@@ -23,6 +23,7 @@ namespace GyroAim {
 
         float yawSensitivity{0.25F};
         float pitchSensitivity{0.1875F};
+        float horseLookScale{10.0F};
         GyroAxis yawAxis{GyroAxis::kY};
         GyroAxis pitchAxis{GyroAxis::kX};
         bool invertYaw{false};

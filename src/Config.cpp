@@ -55,7 +55,8 @@ namespace GyroAim {
             ini.SetUnicode();
             ini.SetValue(L"General", nullptr, nullptr, L"; GyroAim config. Delete this file to regenerate defaults.");
             ini.SetValue(L"General", L"inputSource", L"steam", L"; gyro input source: steam (dsu/hid planned)");
-            ini.SetValue(L"General", L"logLevel", L"info", L"; trace | debug | info | warn | error");
+            ini.SetValue(L"General", L"logLevel", L"debug",
+                         L"; trace | debug | info | warn | error (debug while diagnosing horse pitch)");
             ini.SetValue(L"Steam", nullptr, nullptr, L"; settings for inputSource = steam");
             ini.SetValue(L"Steam", L"steamApiPath", L"", L"; steam_api64.dll path; empty = normal DLL search order");
             ini.SetValue(L"Gyro", nullptr, nullptr, L"; sensor data pipeline");
@@ -65,17 +66,22 @@ namespace GyroAim {
             ini.SetValue(L"Gyro", L"yawRelaxFactor", L"1.41", L"; player-space yaw relax factor (GMH default)");
             ini.SetValue(L"Gyro", L"yawAxis", L"y", L"; local space only: yaw axis (x | y | z)");
             ini.SetValue(L"Gyro", L"pitchAxis", L"x", L"; local space only: pitch axis (x | y | z)");
-            ini.SetValue(L"Feel", nullptr, nullptr, L"; per-axis feel tuning (horizontal and vertical are independent)");
+            ini.SetValue(L"Feel", nullptr, nullptr,
+                         L"; per-axis feel tuning (horizontal and vertical are independent)");
             ini.SetValue(L"Feel", L"yawSensitivity", L"0.25", L"; horizontal sensitivity");
             ini.SetValue(L"Feel", L"pitchSensitivity", L"0.1875", L"; vertical sensitivity");
+            ini.SetValue(L"Feel", L"horseLookScale", L"10.0",
+                         L"; synthesized HandleLookInput stick magnitude (rad pitch x scale = input units)");
             ini.SetValue(L"Feel", L"invertYaw", L"false", L"; reverse horizontal direction");
             ini.SetValue(L"Feel", L"invertPitch", L"false", L"; reverse vertical direction");
             ini.SetValue(L"Feel", L"yawDeadzoneDegPerSec", L"4.0", L"; horizontal deadzone (deg/s)");
             ini.SetValue(L"Feel", L"pitchDeadzoneDegPerSec", L"4.0", L"; vertical deadzone (deg/s)");
             ini.SetValue(L"Feel", L"smoothing", L"0.7", L"; low-pass smoothing 0..1 (higher = smoother)");
-            ini.SetValue(L"Feel", L"pitchClampDeg", L"80.0", L"; accumulated pitch clamp from enable point (anti-flip)");
+            ini.SetValue(L"Feel", L"pitchClampDeg", L"80.0",
+                         L"; accumulated pitch clamp from enable point (anti-flip)");
             ini.SetValue(L"Activation", nullptr, nullptr, L"; when the gyro takes over the camera");
-            ini.SetValue(L"Activation", L"enableOnBowDraw", L"true", L"; true = while drawing a bow; false = always on");
+            ini.SetValue(L"Activation", L"enableOnBowDraw", L"true",
+                         L"; true = while drawing a bow; false = always on");
             if (ini.SaveFile(a_path.wstring().c_str()) < 0) {
                 SKSE::log::warn("could not write default config to {}"sv, a_path.string());
             } else {
@@ -124,7 +130,7 @@ namespace GyroAim {
 
         // injectionMode is retired (2026-10-14 rollback): only the freeRotation
         // increment baseline ships; leftover ini values are ignored.
-        _settings.logLevel = Narrow(getString(L"General", L"logLevel", L"info"));
+        _settings.logLevel = Narrow(getString(L"General", L"logLevel", L"debug"));
 
         _settings.steamApiPath = Narrow(getString(L"Steam", L"steamApiPath", L""));
 
@@ -147,6 +153,7 @@ namespace GyroAim {
 
         _settings.yawSensitivity = getFloat(L"Feel", L"yawSensitivity", 0.25F);
         _settings.pitchSensitivity = getFloat(L"Feel", L"pitchSensitivity", 0.1875F);
+        _settings.horseLookScale = getFloat(L"Feel", L"horseLookScale", 10.0F);
         _settings.invertYaw = getBool(L"Feel", L"invertYaw", false);
         _settings.invertPitch = getBool(L"Feel", L"invertPitch", false);
         _settings.yawDeadzoneDegPerSec = getFloat(L"Feel", L"yawDeadzoneDegPerSec", 4.0F);
