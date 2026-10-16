@@ -102,7 +102,13 @@ enableOnBowDraw = true     ; true = 拉弓瞄准时启用，扣下扳机（kBowD
 - **八轮：骑马俯仰改走原生视角通道**（2026-10-15）：七轮骑马 pitch 双写（`freeRotation.y` + `data.angle.x`）实测仍无效——可见骑手上下动作（`data.angle.x` 生效）但准星/镜头俯仰不动，且两 DLL 产物校验为新代码，排除陈旧构建。结论：骑马瞄准态下相机俯仰不派生自这两个字段（`freeRotation` 疑被瞄准态门控/每帧重置，与三轮 SmoothCam RE 结论一致；`data.angle.x` 只驱动骑手动画）。改为调用 `HorseCameraState::HandleLookInput`（TDM hook 的同一入口 = 右摇杆俯仰的原生通道），游戏自行处理镜头/准星/动画；新增 `[Feel] horseLookScale` 校准输入单位（debug 日志含各字段 pre/post 快照，若 pre ≠ 上帧 post 即为外部 mod 覆盖，走 C2 patch 路线）。
 - **九轮：骑马俯仰单位标定定案**（2026-10-15，日志实证）：诊断构建日志（`horse look-input` hook + 字段 pre/post 快照）一次性定案——(a) `HandleLookInput` 通道正常且就是俯仰真值通道（输入→`freeRotation.y` 线性变化，骑手俯仰由引擎镜像同步 `playerPitch = -freeRot.y`，这也解释了此前直写字段无效）；(b) 输入是**摇杆量纲**而非弧度：实测 1 输入单位 ≈ **0.1 弧度/帧**（摇杆 0.17136/0.23821/0.24834 → ΔfreeRot.y 0.0172/0.0238/0.0248，比值 0.1004/0.1000/0.0999），此前把弧度增量当输入用，量级小 300~800 倍，故"完全无反应"。修复：`horseLookScale` 默认 1.0 → **10.0**（= 1/0.1），注入以校准后的摇杆量纲进原生通道，镜头速度与 FP/TP 的弧度语义一致。
 
-## 当前范围与已知限制
+## Phase 2.2：马背俯仰（已修复，2026-10-16）
+
+**最终生效路径**：`HorseCameraState::GetRotation`（vtable 0x04）消费点 hook——原函数（TDM 或 vanilla 合成）产出朝向后，叠加自维护的累计俯仰（`ComposeMountedPitch`，相机右轴四元数左乘，`pitchClampDeg` 钳制，失活归零）；yaw 走马头 `SetRotationZ` 增量。**与合成器身份无关**（TDM 开/关均有效）。
+
+**根因记录**：马背瞄准朝向只在 GetRotation 取用点被消费；一切"状态字段/输入链"写入（HandleLookInput 入参、`lookInputVec`、`angle.x`、`freeRotation` 镜像对、`rotation` 成员 post 写）对该消费点全部不可见——TDM 占用 0x0E/0x0F 是并存现象而非成因。兼容排查请用加载期四行探针（模块清单 / 钩子链归属 / 旋转合成者 / rig 标志）。
+
+当前范围与已知限制
 
 - 第一人称、第三人称、骑马三种相机状态均已支持（Phase 1.1）；拉弓扣扳机即激活（Phase 2.1，D8 扩展于 Phase 4）；
 - 陀螺数据默认走 GMH 融合姿态差量（`gyroData = quat`）；`rotVel` 为备选路径。Steam V2 `driftCorrectedQuat` 无公开接口，等价能力由 GMH 本地实现（见 Phase 2 一节）；

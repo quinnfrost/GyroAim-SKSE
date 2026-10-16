@@ -25,6 +25,9 @@ namespace GyroAim {
         // dispatch (camera-hook wrapper). Returns the gyro pitch contribution in look-input
         // units to add to the game's input, or 0 when inactive.
         float OnHorseLookInputPhase(RE::HorseCameraState* a_state);
+        // Round 22: post-compose the accumulated mounted pitch onto whatever orientation
+        // the state hands the camera (GetRotation consumption hook).
+        void ComposeMountedPitch(RE::NiQuaternion& a_rotation);
 
     private:
         using TimePoint = std::chrono::steady_clock::time_point;
@@ -52,6 +55,10 @@ namespace GyroAim {
         // runs after the original state Update.
         FrameDelta _horseDelta{};
         bool _hasHorseDelta{false};
+        // Direct-rotation path (round 21): accumulated mounted pitch composed into
+        // ThirdPersonState::rotation post-stage every frame; persistence lives here
+        // because the mounted composer (TDM or vanilla) rebuilds the field itself.
+        float _horseRotPitch{0.0F};
 
         IGyroSource* _source{nullptr};
 

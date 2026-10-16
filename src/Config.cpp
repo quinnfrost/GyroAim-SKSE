@@ -55,8 +55,7 @@ namespace GyroAim {
             ini.SetUnicode();
             ini.SetValue(L"General", nullptr, nullptr, L"; GyroAim config. Delete this file to regenerate defaults.");
             ini.SetValue(L"General", L"inputSource", L"steam", L"; gyro input source: steam (dsu/hid planned)");
-            ini.SetValue(L"General", L"logLevel", L"debug",
-                         L"; trace | debug | info | warn | error (debug while diagnosing horse pitch)");
+            ini.SetValue(L"General", L"logLevel", L"info", L"; trace | debug | info | warn | error");
             ini.SetValue(L"Steam", nullptr, nullptr, L"; settings for inputSource = steam");
             ini.SetValue(L"Steam", L"steamApiPath", L"", L"; steam_api64.dll path; empty = normal DLL search order");
             ini.SetValue(L"Gyro", nullptr, nullptr, L"; sensor data pipeline");
@@ -130,7 +129,7 @@ namespace GyroAim {
 
         // injectionMode is retired (2026-10-14 rollback): only the freeRotation
         // increment baseline ships; leftover ini values are ignored.
-        _settings.logLevel = Narrow(getString(L"General", L"logLevel", L"debug"));
+        _settings.logLevel = Narrow(getString(L"General", L"logLevel", L"info"));
 
         _settings.steamApiPath = Narrow(getString(L"Steam", L"steamApiPath", L""));
 

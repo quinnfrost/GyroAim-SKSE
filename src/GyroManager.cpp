@@ -103,6 +103,7 @@ namespace GyroAim {
         _smoothPitch = 0.0F;
         _pitchAccum = 0.0F;
         _hasOrientation = false;
+        _horseRotPitch = 0.0F;  // release the direct-rotation offset when the gyro idles
     }
 
     void GyroManager::LogHeartbeat(RE::TESCameraState* a_state, TimePoint a_now) {
@@ -119,6 +120,24 @@ namespace GyroAim {
 
         SKSE::log::info("heartbeat camera={} attackState={} bowAiming={} gyro={}"sv, CameraStateName(cameraId),
                         attackState, IsBowAiming(), _source != nullptr);
+
+        // Compatibility probes: which rig owns the camera this frame. -1 = n/a for
+        // this state. A mod-managed aim rig (IC/TDM/SmoothCam) shows up as these flags
+        // behaving differently from vanilla expectations while our rider write moves
+        // the rider but not the view.
+        int freeRO = -1;
+        int animCam = -1;
+        int applyOff = -1;
+        if (cameraId == static_cast<std::uint32_t>(RE::CameraStates::kThirdPerson) ||
+            cameraId == static_cast<std::uint32_t>(RE::CameraStates::kMount)) {
+            const auto* tp = static_cast<const RE::ThirdPersonState*>(a_state);
+            freeRO = tp->freeRotationEnabled ? 1 : 0;
+            animCam = tp->toggleAnimCam ? 1 : 0;
+            applyOff = tp->applyOffsets ? 1 : 0;
+        }
+        const auto* camera = RE::PlayerCamera::GetSingleton();
+        const int zoom = camera && camera->bowZoomedIn ? 1 : 0;
+        SKSE::log::info("rig freeRO={} animCam={} applyOff={} bowZoom={}"sv, freeRO, animCam, applyOff, zoom);
 
         // Ground truth for drift/axis investigations: after the raw-scale conversion,
         // accelMag should read ~1.0 (g) at rest; grav should be ~ (0,-1,0) at rest on a
@@ -290,13 +309,17 @@ namespace GyroAim {
         _horseDelta = delta;
         _hasHorseDelta = true;
 
-        // Mounted-aim pitch carrier, proven from the round-15/16 logs: while aiming,
-        // stick y maps to the RIDER pitch (data.angle.x) at -0.1 rad per input unit and
-        // that is what moves the crosshair; both earlier rider writes (round 7) missed
-        // the input-phase consumption this hook runs in. Write it here, at input phase,
-        // with the exact expression the verified first-person path uses (up is negative).
+        // Mounted-aim pitch carrier, proven from the round-15/16/18 logs: while aiming
+        // the engine maintains a (rider pitch, freeRotation.y = -pitch) MIRROR PAIR as
+        // the aim state -- stick frames update both together (d_fy == -d_pp exactly),
+        // while our rider-only writes left the mirror stale: the character animated but
+        // the crosshair (which reads the mirrored state) never moved, and a stick nudge
+        // re-synced the pair from the engine's own accumulator (the "snap back level").
+        // Write BOTH at input phase, same moment and same relation as the engine
+        // (up is negative, identical to the verified first-person expression).
         if (auto* player = RE::PlayerCharacter::GetSingleton()) {
             player->SetRotationX(std::clamp(player->data.angle.x - delta.pitch, -kMaxPitch, kMaxPitch));
+            a_state->freeRotation.y += delta.pitch;  // mirror: d_fy == -d_pp
         }
 
         // Stick-magnitude contribution for the forwarded argument (redundant; the
@@ -365,6 +388,34 @@ namespace GyroAim {
         player->SetRotationX(std::clamp(player->data.angle.x - a_delta.pitch, -kMaxPitch, kMaxPitch));
     }
 
+    void GyroManager::ComposeMountedPitch(RE::NiQuaternion& a_rotation) {
+        if (std::fabs(_horseRotPitch) < 1e-7F) {
+            return;
+        }
+        auto& q = a_rotation;
+        // Camera right axis in world = first column of R(q).
+        const float rx = 1.0F - 2.0F * (q.y * q.y + q.z * q.z);
+        const float ry = 2.0F * (q.x * q.y + q.w * q.z);
+        const float rz = 2.0F * (q.x * q.z - q.w * q.y);
+        const float axisLen = std::sqrt(rx * rx + ry * ry + rz * rz);
+        if (axisLen <= 1e-6F || std::fabs(_horseRotPitch) < 1e-7F) {
+            return;
+        }
+        const float half = _horseRotPitch * 0.5F;
+        const float s = std::sin(half) / axisLen;
+        const float c = std::cos(half);
+        const float px = c * q.w - rx * s * q.x - ry * s * q.y - rz * s * q.z;
+        const float py = c * q.x + rx * s * q.w + ry * s * q.z - rz * s * q.y;
+        const float pz = c * q.y - rx * s * q.z + ry * s * q.w + rz * s * q.x;
+        const float pw = c * q.z + rx * s * q.y - ry * s * q.x + rz * s * q.w;
+        const float len = std::sqrt(px * px + py * py + pz * pz + pw * pw);
+        // px/py/pz/pw hold the product's w/x/y/z parts respectively.
+        q.w = px / len;
+        q.x = py / len;
+        q.y = pz / len;
+        q.z = pw / len;
+    }
+
     void GyroManager::ApplyToHorse(RE::HorseCameraState* a_state, const FrameDelta& a_delta) {
         // yaw: steer the horse heading (the mounted aim direction); the camera anchor
         // follows so the view and crosshair turn with it. Applied after the original
@@ -376,10 +427,14 @@ namespace GyroAim {
             a_state->horseCurrentDirection = horse->GetHeading(false);
         }
 
-        // pitch: no direct field write -- the engine consumes and resets freeRotation
-        // every frame here (round 11 measured: our fy.y write produced only a small
-        // orbit-position shift and was wiped, d_fy = 0/50 frames; fx is the orbit yaw
-        // offset, round 10 went horizontal). The stick-validated HandleLookInput path
-        // in OnHorseCameraPreUpdate is the pitch channel.
+        // pitch accumulation (round 22): the mounted composer rebuilds rotation from
+        // its own state every frame (TDM when installed, vanilla otherwise) and even a
+        // post-Update member write was not consumed (round 21), so the member is left
+        // untouched here -- the composed offset is applied exactly once per frame at
+        // the GetRotation consumption hook (CameraHook::HorseGetRotation). Persistence
+        // lives in _horseRotPitch; yaw already works through the horse heading.
+        const auto& cfg = Config::GetSingleton()->GetSettings();
+        const float clampRad = std::fabs(cfg.pitchClampDeg) * 0.017453292519943295F;
+        _horseRotPitch = std::clamp(_horseRotPitch + a_delta.pitch, -clampRad, clampRad);
     }
 }
