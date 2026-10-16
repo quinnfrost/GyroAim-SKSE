@@ -25,9 +25,16 @@ namespace GyroAim {
         // dispatch (camera-hook wrapper). Returns the gyro pitch contribution in look-input
         // units to add to the game's input, or 0 when inactive.
         float OnHorseLookInputPhase(RE::HorseCameraState* a_state);
-        // Round 22: post-compose the accumulated mounted pitch onto whatever orientation
-        // the state hands the camera (GetRotation consumption hook).
-        void ComposeMountedPitch(RE::NiQuaternion& a_rotation);
+        // Post-compose entry points from the GetRotation hooks (round 22 path, now
+        // per-context/per-axis via [Advanced] inject* = compose; field-mode axes keep
+        // their accumulators at zero so this is a no-op for them).
+        void ComposeMountedRotation(RE::NiQuaternion& a_rotation);
+        void ComposeThirdPerson(RE::NiQuaternion& a_rotation);
+        void ComposeFirstPerson(RE::NiQuaternion& a_rotation);
+
+        // Round 24 diagnostics: accumulator readouts for the compose-frame log.
+        [[nodiscard]] float MountedYawAccumulator() const { return _horseYawAcc; }
+        [[nodiscard]] float MountedPitchAccumulator() const { return _horseRotPitch; }
 
     private:
         using TimePoint = std::chrono::steady_clock::time_point;
@@ -55,10 +62,15 @@ namespace GyroAim {
         // runs after the original state Update.
         FrameDelta _horseDelta{};
         bool _hasHorseDelta{false};
-        // Direct-rotation path (round 21): accumulated mounted pitch composed into
-        // ThirdPersonState::rotation post-stage every frame; persistence lives here
-        // because the mounted composer (TDM or vanilla) rebuilds the field itself.
+        // Composition accumulators: fed only when the matching [Advanced] inject*
+        // method is compose; persistence lives here (the field/composer may rebuild
+        // its own state every frame), zeroed whenever the gyro goes idle.
         float _horseRotPitch{0.0F};
+        float _horseYawAcc{0.0F};
+        float _tpYawAcc{0.0F};
+        float _tpPitchAcc{0.0F};
+        float _fpYawAcc{0.0F};
+        float _fpPitchAcc{0.0F};
 
         IGyroSource* _source{nullptr};
 

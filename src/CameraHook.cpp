@@ -21,6 +21,29 @@ namespace GyroAim::CameraHook {
         using GetRotationFn = void (*)(RE::TESCameraState*, RE::NiQuaternion&);
         GetRotationFn _OriginalHorseGetRotation = nullptr;
 
+        // Round 24 diagnostic: when the mounted yaw composer runs, compare the axis we
+        // derive from the state quaternion against the camera's REAL basis vectors from
+        // cameraRoot->world.rotate. Probe result (717 frames): root rows =
+        // (right, forward, up) -- Skyrim's right/forward/up basis -- and our former
+        // column1 "up" was actually FORWARD (the roll bug; fixed to column2 = up in
+        // ComposeYawPitch). Kept for future frame-convention checks.
+        void LogComposeFrameCheck(float a_yaw, float a_pitch, const RE::NiQuaternion& a_q) {
+            // Axis we are about to use (column1 of the state quaternion) ...
+            const float ux = 2.0F * (a_q.x * a_q.y - a_q.w * a_q.z);
+            const float uy = 1.0F - 2.0F * (a_q.x * a_q.x + a_q.z * a_q.z);
+            const float uz = 2.0F * (a_q.y * a_q.z + a_q.w * a_q.x);
+            const auto* camera = RE::PlayerCamera::GetSingleton();
+            if (!camera || !camera->cameraRoot) {
+                return;
+            }
+            // ... versus the camera's real basis from cameraRoot->world.rotate.
+            const auto& m = camera->cameraRoot->world.rotate;
+            SKSE::log::debug(
+                "composeFrame yawAcc={:.4f} pitchAcc={:.4f} q=({:.3f},{:.3f},{:.3f},{:.3f}) myUp=({:.3f},{:.3f},{:.3f}) root rowX=({:.3f},{:.3f},{:.3f}) rowY=({:.3f},{:.3f},{:.3f}) rowZ=({:.3f},{:.3f},{:.3f})"sv,
+                a_yaw, a_pitch, a_q.w, a_q.x, a_q.y, a_q.z, ux, uy, uz, m.entry[0][0], m.entry[0][1], m.entry[0][2],
+                m.entry[1][0], m.entry[1][1], m.entry[1][2], m.entry[2][0], m.entry[2][1], m.entry[2][2]);
+        }
+
         // Round 22: compose the accumulated gyro pitch at the CONSUMPTION point --
         // GetRotation is where the camera pulls the state's orientation, after Update
         // (where both TDM and vanilla compose from their own state) and before the
@@ -29,7 +52,27 @@ namespace GyroAim::CameraHook {
         // a hook on the getter itself.
         void HorseGetRotation(RE::TESCameraState* a_self, RE::NiQuaternion& a_rotation) {
             _OriginalHorseGetRotation(a_self, a_rotation);
-            GyroManager::GetSingleton()->ComposeMountedPitch(a_rotation);
+            if (std::fabs(GyroManager::GetSingleton()->MountedYawAccumulator()) > 1e-7F) {
+                LogComposeFrameCheck(GyroManager::GetSingleton()->MountedYawAccumulator(),
+                                     GyroManager::GetSingleton()->MountedPitchAccumulator(), a_rotation);
+            }
+            GyroManager::GetSingleton()->ComposeMountedRotation(a_rotation);
+        }
+
+        GetRotationFn _OriginalThirdGetRotation = nullptr;
+        GetRotationFn _OriginalFirstGetRotation = nullptr;
+
+        // [Advanced] injectThirdPerson* / injectFirstPerson* = compose: same
+        // consumption-hook path as the mounted pitch, per-axis; no-op in field mode
+        // (accumulators only fed when that axis' method is compose).
+        void ThirdGetRotation(RE::TESCameraState* a_self, RE::NiQuaternion& a_rotation) {
+            _OriginalThirdGetRotation(a_self, a_rotation);
+            GyroManager::GetSingleton()->ComposeThirdPerson(a_rotation);
+        }
+
+        void FirstGetRotation(RE::TESCameraState* a_self, RE::NiQuaternion& a_rotation) {
+            _OriginalFirstGetRotation(a_self, a_rotation);
+            GyroManager::GetSingleton()->ComposeFirstPerson(a_rotation);
         }
 
         // The game dispatches the mounted look input every frame; rounds 15-16 proved
@@ -135,6 +178,11 @@ namespace GyroAim::CameraHook {
         _OriginalHorseGetRotation = reinterpret_cast<GetRotationFn>(previousRotation);
         const auto previousLook = horseVtable.write_vfunc(0x0F, &HorseLookInput);
         _OriginalHorseLookInput = reinterpret_cast<HorseLookFn>(previousLook);
+
+        REL::Relocation<std::uintptr_t> thirdVtable{RE::ThirdPersonState::VTABLE[0]};
+        _OriginalThirdGetRotation = reinterpret_cast<GetRotationFn>(thirdVtable.write_vfunc(0x04, &ThirdGetRotation));
+        REL::Relocation<std::uintptr_t> firstVtable{RE::FirstPersonState::VTABLE[0]};
+        _OriginalFirstGetRotation = reinterpret_cast<GetRotationFn>(firstVtable.write_vfunc(0x04, &FirstGetRotation));
 
         // Diagnostic: who composes the mounted camera rotation each frame -- vtable
         // slot 0x0E is ThirdPersonState::UpdateRotation; TDM overrides exactly this slot

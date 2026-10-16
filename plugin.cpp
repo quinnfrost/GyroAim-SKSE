@@ -14,6 +14,27 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse) {
             SKSE::log::error("failed to load GyroAim.ini; gyro disabled"sv);
             return true;
         }
+        const auto& s = GyroAim::Config::GetSingleton()->GetSettings();
+        const auto methodName = [](GyroAim::InjectionMethod a_method) {
+            switch (a_method) {
+                case GyroAim::InjectionMethod::kCompose:
+                    return "compose";
+                case GyroAim::InjectionMethod::kHeading:
+                    return "heading";
+                case GyroAim::InjectionMethod::kRider:
+                    return "rider";
+                case GyroAim::InjectionMethod::kField:
+                default:
+                    return "field";
+            }
+        };
+        SKSE::log::info("config inject: TP(yaw={} pitch={}) FP(yaw={} pitch={}) mounted(yaw={} pitch={})"sv,
+                        methodName(s.injectThirdPersonYaw), methodName(s.injectThirdPersonPitch),
+                        methodName(s.injectFirstPersonYaw), methodName(s.injectFirstPersonPitch),
+                        methodName(s.injectMountedYaw), methodName(s.injectMountedPitch));
+        SKSE::log::info("config feel: sens TP={:.3f}/{:.3f} FP={:.3f}/{:.3f} mounted={:.3f}/{:.3f} (yaw/pitch)"sv,
+                        s.thirdYawSensitivity, s.thirdPitchSensitivity, s.firstYawSensitivity, s.firstPitchSensitivity,
+                        s.mountedYawSensitivity, s.mountedPitchSensitivity);
         SKSE::log::info("config loaded: {}"sv, GyroAim::Config::GetSingleton()->GetFilePath().string());
     } catch (const std::exception& e) {
         SKSE::log::error("config load threw ({}); gyro disabled"sv, e.what());

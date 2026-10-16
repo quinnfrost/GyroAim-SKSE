@@ -21,33 +21,43 @@
 
 ```ini
 [General]
-inputSource = steam        ; 输入源：steam（dsu/hid 为 Phase 3 计划，当前填了会报错并禁用）
 logLevel = info            ; trace | debug | info | warn | error
+enableOnBowDraw = true     ; true = 拉弓时启用陀螺仪；false = 常开（调试）
 
-[Steam]
-steamApiPath =             ; steam_api64.dll 路径，留空 = 标准 DLL 搜索顺序
+[Gyro]                     ; 手感调校（第三/第一人称 = 步行，mounted = 骑马）
+thirdYawSensitivity = 0.25       ; 第三人称 水平灵敏度
+thirdPitchSensitivity = 0.1875   ; 第三人称 垂直灵敏度
+firstYawSensitivity = 0.25       ; 第一人称 水平灵敏度
+firstPitchSensitivity = 0.1875   ; 第一人称 垂直灵敏度
+mountedYawSensitivity = 0.25     ; 骑马 水平灵敏度
+mountedPitchSensitivity = 0.1875 ; 骑马 垂直灵敏度
+thirdInvertYaw = false      ; 第三人称 水平反转（six invert keys: third/first/mounted x yaw/pitch）
+firstInvertYaw = false
+mountedInvertYaw = false
+thirdInvertPitch = false
+firstInvertPitch = false
+mountedInvertPitch = false
+yawDeadzoneDegPerSec = 4.0  ; 水平死区（deg/s）
+pitchDeadzoneDegPerSec = 4.0 ; 垂直死区（deg/s）
+smoothing = 0.7             ; 低通平滑 0..1（越大越平滑）
+pitchClampDeg = 80.0        ; 累计俯仰钳制（防翻转）
 
-[Gyro]                     ; 传感器数据管线
-gyroData = quat            ; quat = 融合姿态逐帧差量（D5 语义，默认）；rotVel = 角速度路径
-gyroSpace = player         ; player | local | world（GamepadMotionHelpers 空间转换）
-calibration = true         ; GMH 静止 + 传感器融合自动标定（漂移补偿）；false = 关闭
-yawRelaxFactor = 1.41      ; player 空间的 yaw 放松系数（GMH 默认）
-yawAxis = y                ; 仅 local 空间生效：偏航取哪个轴，x | y | z（GMH Y-up 约定 Y = yaw）
-pitchAxis = x              ; 仅 local 空间生效：俯仰轴，x | y | z
-
-[Feel]                     ; 手感调校（水平/垂直完全独立）
-yawSensitivity = 0.25      ; 水平灵敏度
-pitchSensitivity = 0.1875  ; 垂直灵敏度（默认较水平低四分之一）
-horseLookScale = 10.0      ; 马背俯仰合成输入的摇杆量纲换算（弧度增量 × 该值 = 输入单位；复测需确认日志中 y ≈ pitch×10）
-invertYaw = false          ; 水平反向
-invertPitch = false        ; 垂直反向
-yawDeadzoneDegPerSec = 4.0     ; 水平死区（deg/s，漂移主要靠它截断）
-pitchDeadzoneDegPerSec = 4.0   ; 垂直死区（deg/s）
-smoothing = 0.7            ; 低通平滑：0 = 关闭，越接近 1 平滑越强
-pitchClampDeg = 80.0       ; 俯仰钳制（陀螺增量层实现，防相机翻转）
-
-[Activation]
-enableOnBowDraw = true     ; true = 拉弓瞄准时启用，扣下扳机（kBowDraw 起）即触发；false = 常开（调试用）
+[Advanced]                  ; 底层选项，一般用户无需改动
+inputSource = steam         ; 陀螺仪输入源：steam（dsu/hid 计划中）
+steamApiPath =              ; steam_api64.dll 路径；空 = 标准 DLL 搜索
+gyroData = quat             ; quat = 融合姿态差量 | rotVel = 角速度
+gyroSpace = player          ; 投影空间：player | world | local
+calibration = true          ; GMH 静止自动标定（漂移补偿）
+yawRelaxFactor = 1.41       ; player 空间 yaw 放松系数
+horseLookScale = 10.0       ; 骑马摇杆量纲换算
+yawAxis = y                 ; local 空间轴映射：x | y | z
+pitchAxis = x
+injectThirdPersonYaw = field      ; field | compose（mod 导致步行第三人称失效时切 compose）
+injectThirdPersonPitch = field    ; field | compose
+injectFirstPersonYaw = field      ; field | compose
+injectFirstPersonPitch = field    ; field | compose
+injectMountedYaw = heading        ; heading | rider | compose（转马头+准星跟随 / 只转角色不转马 / 纯相机）
+injectMountedPitch = compose      ; compose | field（field = 旧 freeRotation 写法）
 ```
 
 生成的 `GyroAim.ini` 每个键带一行英文单行注释（源码字符集安全考虑），含义与上表一致。配置**不兼容旧版布局**（键已从 `[Gyro]` 拆分到 `[Feel]`），升级时删除旧 ini 重新生成即可。

@@ -103,7 +103,12 @@ namespace GyroAim {
         _smoothPitch = 0.0F;
         _pitchAccum = 0.0F;
         _hasOrientation = false;
-        _horseRotPitch = 0.0F;  // release the direct-rotation offset when the gyro idles
+        _horseRotPitch = 0.0F;  // release the composition offsets when the gyro idles
+        _horseYawAcc = 0.0F;
+        _tpYawAcc = 0.0F;
+        _tpPitchAcc = 0.0F;
+        _fpYawAcc = 0.0F;
+        _fpPitchAcc = 0.0F;
     }
 
     void GyroManager::LogHeartbeat(RE::TESCameraState* a_state, TimePoint a_now) {
@@ -211,11 +216,11 @@ namespace GyroAim {
         _smoothYaw += alpha * (yawDeg - _smoothYaw);
         _smoothPitch += alpha * (pitchDeg - _smoothPitch);
 
-        const float yawSign = settings.invertYaw ? -1.0F : 1.0F;
-        const float pitchSign = settings.invertPitch ? -1.0F : 1.0F;
-        const float deltaYaw = _smoothYaw * settings.yawSensitivity * yawSign * kDegToRad;
+        // Raw radian delta: per-context sensitivity/invert and injection method are
+        // applied by the Apply* functions (per [Gyro]/[Advanced] config).
+        const float deltaYaw = _smoothYaw * kDegToRad;
 
-        float deltaPitch = _smoothPitch * settings.pitchSensitivity * pitchSign * kDegToRad;
+        float deltaPitch = _smoothPitch * kDegToRad;
         const float clampRad = std::fabs(settings.pitchClampDeg) * kDegToRad;
         const float targetPitch = std::clamp(_pitchAccum + deltaPitch, -clampRad, clampRad);
         deltaPitch = targetPitch - _pitchAccum;
@@ -318,8 +323,10 @@ namespace GyroAim {
         // Write BOTH at input phase, same moment and same relation as the engine
         // (up is negative, identical to the verified first-person expression).
         if (auto* player = RE::PlayerCharacter::GetSingleton()) {
-            player->SetRotationX(std::clamp(player->data.angle.x - delta.pitch, -kMaxPitch, kMaxPitch));
-            a_state->freeRotation.y += delta.pitch;  // mirror: d_fy == -d_pp
+            const auto& s = Config::GetSingleton()->GetSettings();
+            const float riderPitch = delta.pitch * s.mountedPitchSensitivity * (s.mountedInvertPitch ? -1.0F : 1.0F);
+            player->SetRotationX(std::clamp(player->data.angle.x - riderPitch, -kMaxPitch, kMaxPitch));
+            a_state->freeRotation.y += riderPitch;  // mirror: d_fy == -d_pp
         }
 
         // Stick-magnitude contribution for the forwarded argument (redundant; the
@@ -362,14 +369,25 @@ namespace GyroAim {
     }
 
     void GyroManager::ApplyToThirdPerson(RE::ThirdPersonState* a_state, const FrameDelta& a_delta) {
-        // 2026-10-14 rollback baseline: camera free-rotation increments only. The
-        // targetYaw- and player-heading-based modes were retired after field testing
-        // (free-camera artifact / crosshair mismatch). Red line 3: increments only,
-        // applied after the original Update ran.
-        // 2026-10-15: yaw direction is inverted relative to the player-heading
-        // fields (FP subtracts and is correct), so freeRotation.x subtracts too.
-        a_state->freeRotation.x -= a_delta.yaw;
-        a_state->freeRotation.y += a_delta.pitch;
+        // Red line 3: increments only, applied after the original Update ran. Per-axis
+        // method from [Advanced] injectThirdPerson*: field = the verified freeRotation
+        // increments; compose = feed the accumulator consumed by the GetRotation hook
+        // (the mod-breakage fallback, round-22 path).
+        const auto& s = Config::GetSingleton()->GetSettings();
+        const float yaw = a_delta.yaw * s.thirdYawSensitivity * (s.thirdInvertYaw ? -1.0F : 1.0F);
+        const float pitch = a_delta.pitch * s.thirdPitchSensitivity * (s.thirdInvertPitch ? -1.0F : 1.0F);
+
+        if (s.injectThirdPersonYaw == InjectionMethod::kCompose) {
+            _tpYawAcc += yaw;
+        } else {
+            a_state->freeRotation.x -= yaw;
+        }
+        if (s.injectThirdPersonPitch == InjectionMethod::kCompose) {
+            const float clampRad = std::fabs(s.pitchClampDeg) * kDegToRad;
+            _tpPitchAcc = std::clamp(_tpPitchAcc + pitch, -clampRad, clampRad);
+        } else {
+            a_state->freeRotation.y += pitch;
+        }
     }
 
     void GyroManager::ApplyToFirstPerson(const FrameDelta& a_delta) {
@@ -378,63 +396,117 @@ namespace GyroAim {
             return;
         }
 
-        // FP yaw is the player heading; runtime testing showed the sign is opposite to
-        // the ThirdPersonState yaw fields (2026-10-14), so increments are subtracted.
-        player->SetRotationZ(player->data.angle.z - a_delta.yaw);
+        // Per-axis method from [Advanced] injectFirstPerson*: field = the verified
+        // player-heading writes (yaw subtracts, pitch into angle.x, up is negative);
+        // compose = GetRotation-hook accumulators.
+        const auto& s = Config::GetSingleton()->GetSettings();
+        const float yaw = a_delta.yaw * s.firstYawSensitivity * (s.firstInvertYaw ? -1.0F : 1.0F);
+        const float pitch = a_delta.pitch * s.firstPitchSensitivity * (s.firstInvertPitch ? -1.0F : 1.0F);
 
-        // FP look pitch lives in data.angle.x (up is negative, verified against
-        // ImprovedCameraSE-NG's look-pitch clamps). FirstPersonState's pitch offsets are
-        // re-derived from it every update, so writing them does not persist.
-        player->SetRotationX(std::clamp(player->data.angle.x - a_delta.pitch, -kMaxPitch, kMaxPitch));
+        if (s.injectFirstPersonYaw == InjectionMethod::kCompose) {
+            _fpYawAcc += yaw;
+        } else {
+            player->SetRotationZ(player->data.angle.z - yaw);
+        }
+        if (s.injectFirstPersonPitch == InjectionMethod::kCompose) {
+            const float clampRad = std::fabs(s.pitchClampDeg) * kDegToRad;
+            _fpPitchAcc = std::clamp(_fpPitchAcc + pitch, -clampRad, clampRad);
+        } else {
+            player->SetRotationX(std::clamp(player->data.angle.x - pitch, -kMaxPitch, kMaxPitch));
+        }
     }
 
-    void GyroManager::ComposeMountedPitch(RE::NiQuaternion& a_rotation) {
-        if (std::fabs(_horseRotPitch) < 1e-7F) {
-            return;
+    namespace {
+        // Left-multiply q about a (unit-normalized) axis by angle, then renormalize.
+        void ComposeAxis(RE::NiQuaternion& a_q, float a_ux, float a_uy, float a_uz, float a_angle) {
+            const float len = std::sqrt(a_ux * a_ux + a_uy * a_uy + a_uz * a_uz);
+            if (len <= 1e-6F || std::fabs(a_angle) < 1e-7F) {
+                return;
+            }
+            const float half = a_angle * 0.5F;
+            const float s = std::sin(half) / len;
+            const float c = std::cos(half);
+            const float ux = a_ux * s;
+            const float uy = a_uy * s;
+            const float uz = a_uz * s;
+            const float px = c * a_q.w - ux * a_q.x - uy * a_q.y - uz * a_q.z;
+            const float py = c * a_q.x + ux * a_q.w + uy * a_q.z - uz * a_q.y;
+            const float pz = c * a_q.y - ux * a_q.z + uy * a_q.w + uz * a_q.x;
+            const float pw = c * a_q.z + ux * a_q.y - uy * a_q.x + uz * a_q.w;
+            const float n = std::sqrt(px * px + py * py + pz * pz + pw * pw);
+            // px/py/pz/pw hold the product's w/x/y/z parts respectively.
+            a_q.w = px / n;
+            a_q.x = py / n;
+            a_q.y = pz / n;
+            a_q.z = pw / n;
         }
-        auto& q = a_rotation;
-        // Camera right axis in world = first column of R(q).
-        const float rx = 1.0F - 2.0F * (q.y * q.y + q.z * q.z);
-        const float ry = 2.0F * (q.x * q.y + q.w * q.z);
-        const float rz = 2.0F * (q.x * q.z - q.w * q.y);
-        const float axisLen = std::sqrt(rx * rx + ry * ry + rz * rz);
-        if (axisLen <= 1e-6F || std::fabs(_horseRotPitch) < 1e-7F) {
-            return;
+
+        // Compose accumulated yaw/pitch onto an orientation. Axis convention verified
+        // by the round-24 composeFrame probe (717 frames): the state quaternion lives
+        // in Skyrim's right/forward/up basis -- column0 = camera right (pitch axis,
+        // round-22 verified), column1 = camera FORWARD (using it for yaw rotated about
+        // the view axis = the observed roll bug), column2 = camera up (the yaw axis).
+        // Yaw keeps the negated sign to match the field convention (freeRotation.x -=
+        // yaw, SetRotationZ(angle - yaw)); flip with the per-context invert keys.
+        void ComposeYawPitch(RE::NiQuaternion& a_q, float a_yaw, float a_pitch) {
+            if (std::fabs(a_pitch) >= 1e-7F) {
+                const float rx = 1.0F - 2.0F * (a_q.y * a_q.y + a_q.z * a_q.z);
+                const float ry = 2.0F * (a_q.x * a_q.y + a_q.w * a_q.z);
+                const float rz = 2.0F * (a_q.x * a_q.z - a_q.w * a_q.y);
+                ComposeAxis(a_q, rx, ry, rz, a_pitch);
+            }
+            if (std::fabs(a_yaw) >= 1e-7F) {
+                const float ux = 2.0F * (a_q.x * a_q.y + a_q.w * a_q.z);
+                const float uy = 2.0F * (a_q.y * a_q.z - a_q.w * a_q.x);
+                const float uz = 1.0F - 2.0F * (a_q.x * a_q.x + a_q.y * a_q.y);
+                // Sign fixed by the round-25 runtime test (negated was reversed).
+                ComposeAxis(a_q, ux, uy, uz, a_yaw);
+            }
         }
-        const float half = _horseRotPitch * 0.5F;
-        const float s = std::sin(half) / axisLen;
-        const float c = std::cos(half);
-        const float px = c * q.w - rx * s * q.x - ry * s * q.y - rz * s * q.z;
-        const float py = c * q.x + rx * s * q.w + ry * s * q.z - rz * s * q.y;
-        const float pz = c * q.y - rx * s * q.z + ry * s * q.w + rz * s * q.x;
-        const float pw = c * q.z + rx * s * q.y - ry * s * q.x + rz * s * q.w;
-        const float len = std::sqrt(px * px + py * py + pz * pz + pw * pw);
-        // px/py/pz/pw hold the product's w/x/y/z parts respectively.
-        q.w = px / len;
-        q.x = py / len;
-        q.y = pz / len;
-        q.z = pw / len;
+    }
+
+    void GyroManager::ComposeMountedRotation(RE::NiQuaternion& a_rotation) {
+        ComposeYawPitch(a_rotation, _horseYawAcc, _horseRotPitch);
+    }
+
+    void GyroManager::ComposeThirdPerson(RE::NiQuaternion& a_rotation) {
+        ComposeYawPitch(a_rotation, _tpYawAcc, _tpPitchAcc);
+    }
+
+    void GyroManager::ComposeFirstPerson(RE::NiQuaternion& a_rotation) {
+        ComposeYawPitch(a_rotation, _fpYawAcc, _fpPitchAcc);
     }
 
     void GyroManager::ApplyToHorse(RE::HorseCameraState* a_state, const FrameDelta& a_delta) {
-        // yaw: steer the horse heading (the mounted aim direction); the camera anchor
-        // follows so the view and crosshair turn with it. Applied after the original
-        // Update so the horse's own movement processing cannot overwrite it this frame.
-        RE::Actor* horse =
-            a_state->horseRefHandle ? static_cast<RE::Actor*>(a_state->horseRefHandle.get().get()) : nullptr;
-        if (horse) {
-            horse->SetRotationZ(horse->data.angle.z - a_delta.yaw);
+        const auto& s = Config::GetSingleton()->GetSettings();
+        const float yaw = a_delta.yaw * s.mountedYawSensitivity * (s.mountedInvertYaw ? -1.0F : 1.0F);
+        const float pitch = a_delta.pitch * s.mountedPitchSensitivity * (s.mountedInvertPitch ? -1.0F : 1.0F);
+
+        // yaw: heading = steer the horse (the mounted aim direction, verified; the
+        // camera anchor follows so the view and crosshair turn with it, applied post
+        // Update so movement processing cannot overwrite it); rider = rotate only the
+        // rider (FP-style SetRotationZ, horse keeps its course); compose = camera-only
+        // yaw through the GetRotation hook.
+        if (s.injectMountedYaw == InjectionMethod::kCompose) {
+            _horseYawAcc += yaw;
+        } else if (s.injectMountedYaw == InjectionMethod::kRider) {
+            if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+                player->SetRotationZ(player->data.angle.z - yaw);
+            }
+        } else if (RE::Actor* horse = a_state->horseRefHandle
+                                          ? static_cast<RE::Actor*>(a_state->horseRefHandle.get().get())
+                                          : nullptr) {
+            horse->SetRotationZ(horse->data.angle.z - yaw);
             a_state->horseCurrentDirection = horse->GetHeading(false);
         }
 
-        // pitch accumulation (round 22): the mounted composer rebuilds rotation from
-        // its own state every frame (TDM when installed, vanilla otherwise) and even a
-        // post-Update member write was not consumed (round 21), so the member is left
-        // untouched here -- the composed offset is applied exactly once per frame at
-        // the GetRotation consumption hook (CameraHook::HorseGetRotation). Persistence
-        // lives in _horseRotPitch; yaw already works through the horse heading.
-        const auto& cfg = Config::GetSingleton()->GetSettings();
-        const float clampRad = std::fabs(cfg.pitchClampDeg) * 0.017453292519943295F;
-        _horseRotPitch = std::clamp(_horseRotPitch + a_delta.pitch, -clampRad, clampRad);
+        // pitch: compose = round-22 verified GetRotation consumption path (default);
+        // field = legacy freeRotation.y increment kept as a switchable fallback.
+        if (s.injectMountedPitch == InjectionMethod::kCompose) {
+            const float clampRad = std::fabs(s.pitchClampDeg) * kDegToRad;
+            _horseRotPitch = std::clamp(_horseRotPitch + pitch, -clampRad, clampRad);
+        } else {
+            a_state->freeRotation.y += pitch;
+        }
     }
 }
