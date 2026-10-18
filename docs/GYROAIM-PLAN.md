@@ -17,7 +17,7 @@
 - **C1 叠加共存**：陀螺仪视角移动必须与右摇杆视角叠加同时工作（不接管、不屏蔽右摇杆）；
 - **C2 兼容降级**：若某兼容目标无法低成本实现广泛兼容，则改为 **patch 形式、由用户选择安装**，不硬做万能兼容；
 - **C3 增量交付**：从基本功能验证开始，逐阶段加入完整功能，每阶段有可玩验收；
-- **C4 输入源配置化**：优先 Steam API；**暂不做自动回退**，由配置文件显式选择输入 API，选定源失败即明确报错并禁用功能。
+- **C4 输入源配置化**：优先 Steam API，由配置文件显式选择输入 API。（2026-10-18 修订：启用 `steam → hid` 回退链，见 Phase 3——取代原"选定源失败即禁用"。）
 
 ### 明确排除
 - VR 版（输入设备枚举不同、收益低）；
@@ -29,7 +29,7 @@
 ## 1. 总体架构
 
 ```
-┌─ GyroSource 层（配置选择，无自动回退）─────────────────┐
+┌─ GyroSource 层（配置优先 + steam→hid 回退链）──────────┐
 │  SteamInputSource   ISteamInput::GetMotionData        │
 │  DsuSource          UDP 127.0.0.1:26760 (Cemuhook)   │
 │  HidSource          SDL3 sensor / hidapi 直读          │
@@ -126,6 +126,14 @@
 - **二十三轮：配置三段重构 + 每上下文/每轴注入方式选项**（2026-10-16）：ini 重组为 `General`（logLevel 默认 info + enableOnBowDraw）/ `Gyro`（用户手感：第三/第一/骑马 × 水平/垂直 灵敏度与反转、死区、平滑、钳制）/ `Advanced`（底层：inputSource、steamApiPath、gyroData/Space、calibration、axis、scale 等），当前行为全部作为默认值；Advanced 新增六键 `inject{ThirdPerson,FirstPerson,Mounted}{Yaw,Pitch} = field|compose|heading`——依据二十轮 A/B（三 mod 全关时步行第三人称同样失效），为步行上下文提供 GetRotation 消费点 compose 作为 mod 兼容逃生舱；compose 路径已实现为第三/第一人称 vtable 0x04 getter hook + 每上下文独立累加器（失活归零），骑马默认维持已验证的 heading yaw + compose pitch。旧分区（Steam/Feel/Activation、全局 sensitivity/invert）移除，需删 ini 重新生成。
 - **二十四轮：compose yaw 横滚 bug 定案与修复（2026-10-17）**：`composeFrame` 探针 717 帧实测——`cameraRoot->world.rotate` 基向量布局为 **(right, forward, up)**（Skyrim Z-up 约定），状态四元数同系：col0=right（二十二轮 pitch 合成因此有效）、**col1=forward、col2=up**。原 ComposeYawPitch 误用 col1 作"up"→ yaw 合成绕**视轴**旋转 = 观察到的横滚。修复：yaw 轴改 col2（公式 `2(xy+wz), 2(yz−wx), 1−2(x²+y²)`），符号沿用 field 惯例（负向，可由各上下文 invert 翻转）；行走/马背 compose 共用同一函数一并修正。触发条件 = 任意上下文 `inject*yaw=compose`（当时用户手改 mounted yaw=compose；默认仍 heading/field 不受影响）。待复测：roll 消失、水平方向正确（反了调 `mountedInvertYaw`）。
 - **二十五轮：compose yaw 符号修正 + 新增 rider 注入方式（2026-10-17）**：二十四轮修复后 roll 消失、但 compose yaw 方向反（实测）→ 符号翻为正向（`ComposeYawPitch` 注释留档）。用户反馈 compose 手感=纯相机自转、heading=连人带马一起转，追问只转角色 → 新增 `injectMountedYaw = rider`：`player->SetRotationZ(angle.z − yaw)`（FP 同款表达式），马头与行进方向不受影响。**未验证风险（复测点）**：骑乘系统可能每帧把骑手朝向重同步回马头（写入被覆盖→无效果或滞后）；瞄准 yaw 载波此前实证为马头（heading 模式准星跟随 ✓），rider-only 可能出现"角色转但准星不跟"（同十七轮俯仰镜像）——若如此，heading 仍是唯一瞄准耦合 yaw，再议取舍。
+- **二十六轮：新增 orbit 注入方式并设为骑马 yaw 默认（2026-10-18，调研驱动）**：日志实证（68 个瞄准态纯水平摇杆帧，d_fx 68/68 响应）+ TDM/IC 源码交叉验证 → 摇杆水平走的就是 `freeRotation.x`（轨道偏航：准星/相机绕马、马不变向、骑手无重同步），非 mod 行为而是 vanilla 语义。实现 `injectMountedYaw = orbit`：post 阶段 `freeRotation.x -= yaw`（与 TP field 同符号约定，反向可调 `mountedInvertYaw`），设为默认；`heading`（转马）/`rider`（已证伪：骑乘每帧重同步骑手朝向）/`compose`（纯相机兜底）保留可选。
+- **二十七轮：orbit 水平验收通过 + 垂直 2× 落点修复（2026-10-18）**：orbit 水平实测通过。垂直无"orbit 类比"（fx 是唯一轨道偏移字段；fy 的轨道对应十一/十八轮实测仅位置平移不带视图俯仰，死路），垂直维持 compose。用户反馈"落点 ≈ 2× 准星位移"——根因：十九轮引入的输入相位骑手俯仰随行写入（`angle.x -= pitch` + fy 镜像）在 compose 激活时**双计数进瞄准**（compose 转相机 Δ + 瞄准 rig 追骑手 Δ + 该写入再叠 Δ → 箭矢方向 2Δ、准星 Δ）。修复：移除该随行写入（其历史使命"骑手动画跟随"已被瞄准 rig 的自然跟随取代），垂直单一事实源 = GetRotation compose。待复测：落点/准星 1:1；若仍 2× 则箭矢方向另有独立载波，转调研弹道级方案（SmoothCam arrow_fixes 模式）。
+- **二十八轮：orbit+2×修复真机验收通过；hid 输入源落地（协作 session）；版本提交**（2026-10-18）：用户确认 orbit 水平 + compose 垂直 + 2×修复为当前最佳手感，默认值即为该组合（`injectMountedYaw=orbit`、`injectMountedPitch=compose`、其余 field/heading 语义见 CONFIG.md）。协作 session 落地 **Phase 3 `hid` 源**（SDL2 gamecontroller 传感器直读：PS 坐标系=GMH 空间免基变换、rad/s→deg/s 与 m/s²→g 换算、断连重扫、无手柄时明确报错）；**输入源策略更新（修订 C4）**：配置源优先，初始化失败时按固定序 `steam → hid` 受控回退（warn 提示，双失败才禁用）——原"绝不回退"放宽为"显式可诊断的回退"，`dsu` 保留占位。双预设（含 sdl2 依赖）零警告构建通过。
+- **调研记录：相机 mod 源码与 API（2026-10-18 只读调研，IC-NG@2e441c1 / SmoothCam@e0afd09 / TDM@57b913a）**：
+  - **马背偏航机制**：TDM `src/Hooks.cpp:812-841` 生产实证相机 yaw = `马头朝向 + freeRotation.x`，其 UpdateRotation 替身做"马转时 fx += horseCurrentDirection − heading 保持世界瞄准"；SmoothCam `thirdperson.cpp:771-797` "lie-trick"（强制 freeRotationEnabled 调 UpdateRotation 取游戏计算的旋转）+ `:685-722` 直写 cameraRoot/tps->rotation，`GetAimRotation :647-681` 马背瞄准 ±90° faceforward 钳制，`arrow_fixes.cpp:88-196` 弹道级覆写 linearVelocity；IC-NG `cameras/Horse.cpp:64-66,110-130` 仅播种/钳制 fx + 变焦，三库全库 0 命中 SetRotationZ/SetHeading/RotateNode → **没有任何 mod 靠转角色实现瞄准**。
+  - **公开 API**：SmoothCam 有（`SmoothCamAPI.h`，SKSE 消息头 0x9007CA50，sender "SmoothCam"，kPostLoad 注册 loader + kPostPostLoad 请求；IVSmoothCam1 相机/准星/潜行表控制权、IVSmoothCam2 仅位置查询无旋转查询、IVSmoothCam3 `EnableUnlockedHorseAim` 解锁马背 ±90° 钳制；集成范例见 IC-NG `ImprovedCameraSE.cpp:775-786`）；**IC-NG 无公开 API**（include/api 仅 SKSE 样板，SmoothCamAPI.h/TDM API 头均为其消费方 vendored）。
+  - **备用技术栈（按适配度）**：① orbit（本轮已实现，默认）；② SmoothCam lie-trick + cameraRoot 直写（需配 `IsCameraTaken()` 竞态防护）；③ 弹道级解耦（±90° 钳制覆写箭矢速度，配合 SmoothCam V3 免费解锁）。
+  - **遗留分歧标注**：fx/fy 语义各源标注不一（TDM：x=yaw/y=pitch；IC：x="Yaw"/y="Roll"；SmoothCam 调试图把 fy 混入 yaw 序列）——**以 TDM 生产数学为准**；SmoothCam 在马背 vtable "index 4" 挂 ProcessButton 属计数惯例差异，与我们已验证的 0x03/0x04/0x0F 不冲突。
 - **十一轮：回退 fx，俯仰单写 `freeRotation.y`**（2026-10-15，十轮实测触发回退条件）：十轮 fx 写入实测"垂直动作→横摆"，确认 mounted 轨道 yaw = 马头 + `freeRotation.x`（TDM 口径成立、IC 钳制为其 FP 特例），fx 俯仰写入废弃。复核 git 历史：七轮提交代码实为 `data.angle.x` 单写（骑手动画动、镜头不动 → 骑手俯仰非视图俯仰），**`freeRotation.y` 的 post 直写从未真正执行过**（计划"双写"记录与提交不符）；八/九轮 HandleLookInput 通道喂的正是 `fy.y` 且引擎全额处理，但部署构建量纲疑似 ≈1（日志 y≈pitch×1）导致 10 倍欠功率而非通道失效。方案：horse 俯仰与地面 TP 完全同路径同符号 `freeRotation.y += pitch`（`HorseCameraState` 继承同一 `UpdateRotation`，TDM 合成式亦为 `pitch = −freeRotation.y`；地面已验证该写法），单写、无双写干扰；若方向反 → 仅翻 ApplyToHorse 符号。待复测：骑马俯仰生效/方向；若仍无反应 → 转 `rotation` 四元数 post 直写（SmoothCam 机制，观测点 `rotInY` 已就位）。
 
 ### Phase 4 — 功能扩展（工作量：M~L）
@@ -139,11 +147,12 @@
 - 运行时覆盖：SE 1.5.97 + AE 1.6.x + GOG（CommonLibSSE NG `RELOCATION_ID(SE,AE)` 双值 + REL 抽象），VR 明确不支持；
 - **验收**：干净 MO2 环境 + 典型整合包环境各跑通一遍。
 
-### Phase 3 — 多输入源（工作量：M，受 C4 约束）——**调整至末位，暂不计划实现（2026-10-14）**
-- `DsuSource`：Cemuhook UDP（覆盖 DS4Windows 用户、Steam Deck + SteamDeckGyroDSU）；
-- `HidSource`：SDL3 sensor API 或 hidapi 直读（覆盖无 Steam/裸设备）；
-- 配置项 `inputSource = steam | dsu | hid`；**启动时校验选定源，失败 → 日志明确报错 + 功能禁用，不回退**；
-- **验收**：三个源各自可用；切换配置重启生效；选错源时日志可诊断。
+### Phase 3 — 多输入源：**hid 已实现；dsu 不在计划内（2026-10-18 定案）**
+- **`steam`**（默认）：官方 Steam Input 传感器通道；
+- **`hid`**（2026-10-17 实现）：SDL2 GameController 传感器 API（固定 baseline 为 2.22 时代、无 sdl3 端口；Joystick 级 sensor API 为 SDL3 专属），hidapi 共享模式直读 DS4/DualSense/Switch Pro；轴空间与 GMH 同为 PS Y-up 约定、rad/s 与 m/s² 源内换算；热插拔 ~2s 重扫；启动校验失败日志明确报错；
+- **回退策略**（2026-10-18，取代 C4"无自动回退"）：配置源优先尝试，不可用（初始化失败/枚举不到陀螺仪手柄）时按 `steam → hid` 固定顺序回退，全部失败才禁用；失败源先自报原因、回退链再报 `trying next fallback`；
+- **`dsu`**（Cemuhook UDP，覆盖 DS4Windows/HidHide 场景）：**暂不实现**——工程复杂度考虑（2026-10-18 决定）；DualSense 蓝牙在 Windows 的系统级枚举兼容性问题同样**不深究**，记录为已知限制（见 CONFIG.md"输入源已知限制"）；
+- 待评估（低优先）：启动全部失败后进入热插拔重扫循环而非永久禁用。
 
 ---
 
@@ -166,9 +175,9 @@
 - 每 Phase 有独立可玩验收（§2），Phase 1 即可产出"能玩的拉弓陀螺瞄准"原型；
 - 风险最高的两件事（相机写入通路、Steam Input 取数）都压在 Phase 1 尽早暴露。
 
-### C4 输入源配置化
-- `inputSource` 显式配置，无自动探测回退；启动校验失败即禁用 + 明确日志（"选定 steam 源不可用：SteamInput()->Init() 失败"）；
-- 每个源的前置条件写进文档（steam 需 Steam 运行 + 配置支持开启；dsu 需服务端在 26760 端口；hid 需设备未被独占）。
+### C4 输入源配置化（2026-10-18 修订：启用回退链）
+- `inputSource` 显式配置（默认 `steam`），配置源优先尝试；不可用时按固定顺序 `steam → hid` 回退，全部失败才报错禁用（取代原"无自动回退"策略，起因：蓝牙手柄启动瞬间可能不在线）；
+- 每个源的前置条件写进文档（steam 需 Steam 运行 + Gyro Behavior=None；hid 直读共享 HID、无需 Steam）。
 
 ---
 
@@ -198,8 +207,8 @@
 | Improved Camera SE | ⚠️ 观察 | 第一人称阶段处理 |
 | Gamepad++ / Button Freer | ✅ 预期无冲突 | 不依赖 ControlMap 语义即可规避 |
 | SkyUI | ✅ 无冲突 | 纯 UI 层 |
-| DS4Windows（HidHide） | ✅ 走 dsu 源 | UDP motion 可达 |
-| GOG 版 / 无 Steam | ✅ 走 hid/dsu 源 | steam 源明确报错不崩溃 |
+| DS4Windows（HidHide） | ⚠️ HidHide 隐藏物理设备后 steam/hid 均看不到 | 需 DSU 源（暂不实现，2026-10-18） |
+| GOG 版 / 无 Steam | ✅ 走 hid 源 | steam 源失败自动回退，不崩溃 |
 
 ---
 
@@ -269,4 +278,4 @@ cmake --preset debug && cmake --build build/debug
 1. Phase 0：改名 `GyroAim`、日志、INI 读取骨架、帧心跳（验收：`/W4` 零警告 + 游戏内日志输出 `GetAttackState()`）；
 2. Phase 1：SteamInputSource 取数 + 相机层固定测试增量注入 + 拉弓触发 + 右摇杆叠加验证（验收：拉弓手腕转动能转视角，摇杆同时可用）；
 3. Phase 1.1：第一人称与骑马相机注入分流（验收：三种相机状态均可转视角、启停无跳变）；
-4. 之后按 §2 顺序走 Phase 2 → 2.1 → 4 → 5，每阶段过完验收再进下一阶段；Phase 3（多输入源）已移至末位，暂不计划实现。
+4. 之后按 §2 顺序走 Phase 2 → 2.1 → 4 → 5，每阶段过完验收再进下一阶段；Phase 3：hid 已实现（steam/hid 回退链），dsu 不在计划内（2026-10-18 定案）。

@@ -2,6 +2,8 @@
 
 namespace GyroAim {
     enum class InputSourceType : std::uint32_t { kSteam, kDsu, kHid, kUnknown };
+    // dsu is a reserved placeholder (not implemented; selecting it enters the
+    // steam -> hid fallback chain directly).
 
     enum class GyroAxis : std::uint32_t { kX, kY, kZ };
 
@@ -15,11 +17,15 @@ namespace GyroAim {
     //   compose -- accumulate and compose into the orientation returned by the
     //              GetRotation consumption hook (mounted pitch default; also the
     //              fallback for walk contexts when a mod combination breaks fields)
-    //   heading -- steer the actor heading (mounted yaw default; horse+rider turn
-    //              together, crosshair follows -- verified)
-    //   rider   -- rotate only the rider via SetRotationZ (FP-style; horse keeps its
-    //              course; crosshair coupling is runtime-unverified)
-    enum class InjectionMethod : std::uint32_t { kField, kCompose, kHeading, kRider };
+    //   orbit   -- mounted yaw default: freeRotation.x increments, the exact channel
+    //              the right stick uses while mounted (stick-x -> fx, 68/68 logged
+    //              frames; TDM model yaw = horseHeading + fx): aim/camera orbit the
+    //              horse, crosshair follows, horse keeps its course
+    //   heading -- steer the horse heading (turns horse+rider together; verified,
+    //              but changes the horse's travel direction)
+    //   rider   -- rotate only the rider via SetRotationZ (FP-style; proven
+    //              infeasible: the mount system re-slaves rider yaw every frame)
+    enum class InjectionMethod : std::uint32_t { kField, kCompose, kHeading, kRider, kOrbit };
 
     struct Settings {
         // [General]
@@ -58,7 +64,7 @@ namespace GyroAim {
         InjectionMethod injectThirdPersonPitch{InjectionMethod::kField};
         InjectionMethod injectFirstPersonYaw{InjectionMethod::kField};
         InjectionMethod injectFirstPersonPitch{InjectionMethod::kField};
-        InjectionMethod injectMountedYaw{InjectionMethod::kHeading};
+        InjectionMethod injectMountedYaw{InjectionMethod::kOrbit};
         InjectionMethod injectMountedPitch{InjectionMethod::kCompose};
     };
 

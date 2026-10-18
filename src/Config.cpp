@@ -59,6 +59,9 @@ namespace GyroAim {
             if (a_value == L"rider"sv) {
                 return InjectionMethod::kRider;
             }
+            if (a_value == L"orbit"sv) {
+                return InjectionMethod::kOrbit;
+            }
             return InjectionMethod::kField;
         }
 
@@ -91,7 +94,8 @@ namespace GyroAim {
                          L"; accumulated pitch clamp from enable point (anti-flip)");
             ini.SetValue(L"Advanced", nullptr, nullptr,
                          L"; low level -- normally leave alone; delete file to regenerate");
-            ini.SetValue(L"Advanced", L"inputSource", L"steam", L"; gyro input source: steam (dsu/hid planned)");
+            ini.SetValue(L"Advanced", L"inputSource", L"steam",
+                         L"; gyro input source: steam | hid; falls back to the other when unavailable");
             ini.SetValue(L"Advanced", L"steamApiPath", L"", L"; steam_api64.dll path; empty = normal DLL search");
             ini.SetValue(L"Advanced", L"gyroData", L"quat", L"; quat = fused-orientation frame diff | rotVel");
             ini.SetValue(L"Advanced", L"gyroSpace", L"player", L"; projection space: player | world | local");
@@ -106,8 +110,9 @@ namespace GyroAim {
                          L"; field | compose (switch to compose if a mod breaks walking 3rd person pitch)");
             ini.SetValue(L"Advanced", L"injectFirstPersonYaw", L"field", L"; field | compose");
             ini.SetValue(L"Advanced", L"injectFirstPersonPitch", L"field", L"; field | compose");
-            ini.SetValue(L"Advanced", L"injectMountedYaw", L"heading",
-                         L"; heading | rider | compose (turn horse+rider / rider only / camera-only)");
+            ini.SetValue(L"Advanced", L"injectMountedYaw", L"orbit",
+                         L"; orbit | heading | rider | compose (stick-channel orbit / turn horse+rider / rider only / "
+                         L"camera-only)");
             ini.SetValue(L"Advanced", L"injectMountedPitch", L"compose",
                          L"; compose | field (field = legacy freeRotation write)");
             if (ini.SaveFile(a_path.wstring().c_str()) < 0) {
@@ -202,7 +207,7 @@ namespace GyroAim {
         _settings.injectThirdPersonPitch = ParseMethod(getString(L"Advanced", L"injectThirdPersonPitch", L"field"));
         _settings.injectFirstPersonYaw = ParseMethod(getString(L"Advanced", L"injectFirstPersonYaw", L"field"));
         _settings.injectFirstPersonPitch = ParseMethod(getString(L"Advanced", L"injectFirstPersonPitch", L"field"));
-        _settings.injectMountedYaw = ParseMethod(getString(L"Advanced", L"injectMountedYaw", L"heading"));
+        _settings.injectMountedYaw = ParseMethod(getString(L"Advanced", L"injectMountedYaw", L"orbit"));
         _settings.injectMountedPitch = ParseMethod(getString(L"Advanced", L"injectMountedPitch", L"compose"));
 
         ApplyLogLevel(_settings.logLevel);

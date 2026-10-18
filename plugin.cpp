@@ -23,6 +23,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse) {
                     return "heading";
                 case GyroAim::InjectionMethod::kRider:
                     return "rider";
+                case GyroAim::InjectionMethod::kOrbit:
+                    return "orbit";
                 case GyroAim::InjectionMethod::kField:
                 default:
                     return "field";

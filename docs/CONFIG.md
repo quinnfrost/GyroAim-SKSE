@@ -9,13 +9,28 @@
 - 日志写入 `Documents/My Games/<游戏目录>/SKSE/GyroAim.log`，每秒输出一条心跳：相机状态名、`attackState` 原始值、`bowAiming`、陀螺仪是否可用。
 - **升级注意**：默认值只在 `GyroAim.ini` 首次生成时写入。从旧版本升级请删除旧 ini 让它重新生成，或手动对照下表更新数值。
 
-## Steam 前置条件（inputSource = steam）
+## 输入源（[Advanced] inputSource = steam | hid）
 
-1. Steam 客户端必须运行，且手柄通过 Steam Input 连接（DS4 / DualSense / Switch Pro / Steam Deck 内置陀螺仪）；
+**选择与回退**：配置的源优先尝试；不可用时（初始化失败 / 枚举不到陀螺仪手柄，源自身先报原因日志）按固定顺序 `steam → hid` 回退到另一个源；两个都失败才报错并禁用陀螺仪。`dsu` 为占位值、暂未实现（选它等于直接进入回退链）。
+
+### steam 源（默认）
+
+1. Steam 客户端必须运行，且手柄通过 Steam Input 连接（DS4 / DualSense / Switch Pro）；
 2. Steam Input 中该手柄配置的 **Gyro Behavior 设为 None**，避免与本插件叠加出双倍视角移动；
-3. 天赋树：游戏自带的 `steam_api64.dll` 来自 2016 年 SDK，不含 ISteamInput。若日志报 `lacks the ISteamInput flat API`，请把任意现代游戏/Steamworks SDK（1.51+）的 `steam_api64.dll` 拷到 `Data/SKSE/Plugins/`，并在 `[Steam] steamApiPath` 填写它（相对路径基于 SKSE/Plugins 目录）。
+3. 游戏自带的 `steam_api64.dll` 来自 2016 年 SDK，不含 ISteamInput。若日志报 `lacks the ISteamInput flat API`，把任意现代 Steamworks SDK（1.51+）的 `steam_api64.dll` 拷到 `Data/SKSE/Plugins/`，并在 `steamApiPath` 填写它（相对路径基于 SKSE/Plugins 目录）。
 
-源初始化失败时插件**明确报错并禁用陀螺仪功能，不做自动回退**（约束 C4）。
+### hid 源
+
+1. **无需 Steam 运行**：SDL2 hidapi 后端直读手柄 IMU（DualShock 4 / DualSense / Switch Pro），HID 以共享模式打开，可与 Steam Input 等工具共存；
+2. 只认**带陀螺仪**的控制器；启动时枚举不到会进入回退链；
+3. 轴空间与单位与 steam 源等价（SDL 与 GamepadMotionHelpers 同为 PlayStation Y-up 约定，rad/s 与 m/s² 在源内换算），`gyroSpace`/手感配置两源通用；
+4. 热插拔：运行中断开后每 ~2 秒重扫，重连自动恢复（日志 `controller attached`）。
+
+### 输入源已知限制（2026-10-18）
+
+- **DualSense 蓝牙**：Windows 下蓝牙枚举存在系统级兼容性问题（休眠/配对状态导致设备节点对 SDL 不可见），本工程**不深究**（避免复杂度）。建议：改用 USB 连接，或启动游戏前确认手柄已唤醒且系统显示"已连接"；hid 源不可用时会自动回退到 steam 源；
+- Steam Deck 内置手柄（Windows 下经 hid 源）支持情况未验证；
+- `dsu` 源（Cemuhook UDP，覆盖 DS4Windows/HidHide 隐藏设备的场景）暂不实现。
 
 ## 配置项
 
@@ -43,7 +58,7 @@ smoothing = 0.7             ; 低通平滑 0..1（越大越平滑）
 pitchClampDeg = 80.0        ; 累计俯仰钳制（防翻转）
 
 [Advanced]                  ; 底层选项，一般用户无需改动
-inputSource = steam         ; 陀螺仪输入源：steam（dsu/hid 计划中）
+inputSource = steam         ; 陀螺仪输入源：steam | hid；不可用时按 steam → hid 回退
 steamApiPath =              ; steam_api64.dll 路径；空 = 标准 DLL 搜索
 gyroData = quat             ; quat = 融合姿态差量 | rotVel = 角速度
 gyroSpace = player          ; 投影空间：player | world | local
@@ -56,7 +71,7 @@ injectThirdPersonYaw = field      ; field | compose（mod 导致步行第三人�
 injectThirdPersonPitch = field    ; field | compose
 injectFirstPersonYaw = field      ; field | compose
 injectFirstPersonPitch = field    ; field | compose
-injectMountedYaw = heading        ; heading | rider | compose（转马头+准星跟随 / 只转角色不转马 / 纯相机）
+injectMountedYaw = orbit          ; orbit | heading | rider | compose（摇杆同款轨道偏移=默认 / 转马+准星跟随 / 只转角色（已证伪不可行）/ 纯相机兜底）
 injectMountedPitch = compose      ; compose | field（field = 旧 freeRotation 写法）
 ```
 
@@ -122,5 +137,5 @@ injectMountedPitch = compose      ; compose | field（field = 旧 freeRotation �
 
 - 第一人称、第三人称、骑马三种相机状态均已支持（Phase 1.1）；拉弓扣扳机即激活（Phase 2.1，D8 扩展于 Phase 4）；
 - 陀螺数据默认走 GMH 融合姿态差量（`gyroData = quat`）；`rotVel` 为备选路径。Steam V2 `driftCorrectedQuat` 无公开接口，等价能力由 GMH 本地实现（见 Phase 2 一节）；
-- 输入源仅 `steam`；`dsu` / `hid` 为 Phase 3；
+- 输入源 `steam`（官方 Steam Input 传感器通道，默认）与 `hid`（SDL2 hidapi 直读）均已可用，配置源优先、失败按 `steam → hid` 回退；`dsu` 暂不实现；已知限制见"输入源"一节（含 DualSense 蓝牙）；
 - 与 SmoothCam/TDM 共存为 Phase 5 测试矩阵项，冲突则按 C2 patch 化。

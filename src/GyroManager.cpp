@@ -1,6 +1,7 @@
 #include "GyroManager.h"
 
 #include "Config.h"
+#include "HidSource.h"
 #include "SteamInputSource.h"
 
 namespace GyroAim {
@@ -28,6 +29,19 @@ namespace GyroAim {
                                               "dragon"sv};
             return a_id < names.size() ? names[a_id].data() : "unknown";
         }
+
+        [[nodiscard]] const char* SourceName(InputSourceType a_type) {
+            switch (a_type) {
+                case InputSourceType::kSteam:
+                    return "steam";
+                case InputSourceType::kDsu:
+                    return "dsu";
+                case InputSourceType::kHid:
+                    return "hid";
+                default:
+                    return "unknown";
+            }
+        }
     }
 
     GyroManager* GyroManager::GetSingleton() {
@@ -52,26 +66,53 @@ namespace GyroAim {
         }
 
         const auto inputSource = settings.inputSource;
-        switch (inputSource) {
-            case InputSourceType::kSteam:
-                _source = SteamInputSource::GetSingleton();
-                break;
-            case InputSourceType::kDsu:
-            case InputSourceType::kHid:
-                SKSE::log::error("inputSource '{}' is not implemented yet (Phase 3); gyro disabled"sv,
-                                 inputSource == InputSourceType::kDsu ? "dsu" : "hid");
-                return;
-            case InputSourceType::kUnknown:
-            default:
-                SKSE::log::error("inputSource is invalid; gyro disabled"sv);
-                return;
+        if (inputSource == InputSourceType::kUnknown) {
+            SKSE::log::error("inputSource is invalid; gyro disabled"sv);
+            return;
+        }
+        if (inputSource == InputSourceType::kDsu) {
+            SKSE::log::error("inputSource 'dsu' is not implemented yet (Phase 3); falling back to steam/hid"sv);
         }
 
-        if (!_source->Initialize()) {
-            SKSE::log::error("gyro source '{}' failed to initialize; gyro disabled (no automatic fallback)"sv,
-                             _source->Name());
-            _source = nullptr;
+        // Fallback policy (2026-10-18): the configured source is tried first; when it
+        // is unavailable (no gyro controller / init failure, reason logged by the
+        // source itself), the other source is tried (fixed order steam -> hid). Only
+        // total failure disables the gyro.
+        std::array chain{InputSourceType::kSteam, InputSourceType::kHid};
+        if (inputSource == InputSourceType::kHid) {
+            chain = {InputSourceType::kHid, InputSourceType::kSteam};
         }
+
+        for (const auto candidate : chain) {
+            IGyroSource* source = nullptr;
+            switch (candidate) {
+                case InputSourceType::kSteam:
+                    source = SteamInputSource::GetSingleton();
+                    break;
+                case InputSourceType::kHid:
+                    source = HidSource::GetSingleton();
+                    break;
+                default:
+                    break;
+            }
+            if (!source) {
+                continue;
+            }
+            if (source->Initialize()) {
+                _source = source;
+                if (candidate != inputSource) {
+                    SKSE::log::warn("inputSource '{}' unavailable (reason above); using fallback '{}'"sv,
+                                    SourceName(inputSource), SourceName(candidate));
+                }
+                return;
+            }
+            source->Shutdown();
+            SKSE::log::warn("gyro source '{}' unavailable (reason above); trying next fallback"sv,
+                            SourceName(candidate));
+        }
+
+        SKSE::log::error("no gyro source available (inputSource='{}'; tried steam and hid); gyro disabled"sv,
+                         SourceName(inputSource));
     }
 
     void GyroManager::Shutdown() {
@@ -314,23 +355,16 @@ namespace GyroAim {
         _horseDelta = delta;
         _hasHorseDelta = true;
 
-        // Mounted-aim pitch carrier, proven from the round-15/16/18 logs: while aiming
-        // the engine maintains a (rider pitch, freeRotation.y = -pitch) MIRROR PAIR as
-        // the aim state -- stick frames update both together (d_fy == -d_pp exactly),
-        // while our rider-only writes left the mirror stale: the character animated but
-        // the crosshair (which reads the mirrored state) never moved, and a stick nudge
-        // re-synced the pair from the engine's own accumulator (the "snap back level").
-        // Write BOTH at input phase, same moment and same relation as the engine
-        // (up is negative, identical to the verified first-person expression).
-        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
-            const auto& s = Config::GetSingleton()->GetSettings();
-            const float riderPitch = delta.pitch * s.mountedPitchSensitivity * (s.mountedInvertPitch ? -1.0F : 1.0F);
-            player->SetRotationX(std::clamp(player->data.angle.x - riderPitch, -kMaxPitch, kMaxPitch));
-            a_state->freeRotation.y += riderPitch;  // mirror: d_fy == -d_pp
-        }
+        // 2026-10-18 (round 27): the former input-phase rider write
+        // (angle.x -= pitch plus the freeRotation.y mirror) is REMOVED. It was carried
+        // over from the round-19 era as "cosmetic rider animation", but with mounted
+        // pitch compose active it double-counts into the aim: the compose rotates the
+        // camera by delta and the aim rig follows with the rider, while this write
+        // added another delta onto the rider pitch -- the measured symptom was the
+        // arrow landing point moving ~2x the crosshair. Single source of truth: the
+        // GetRotation compose only. Stick-magnitude units are still forwarded on the
+        // native argument (engine ignores it per rounds 15-16; kept as defense).
 
-        // Stick-magnitude contribution for the forwarded argument (redundant; the
-        // engine's canonical read ignored it in round 15-16, kept as defense in depth).
         return delta.pitch * Config::GetSingleton()->GetSettings().horseLookScale;
     }
 
@@ -482,22 +516,26 @@ namespace GyroAim {
         const float yaw = a_delta.yaw * s.mountedYawSensitivity * (s.mountedInvertYaw ? -1.0F : 1.0F);
         const float pitch = a_delta.pitch * s.mountedPitchSensitivity * (s.mountedInvertPitch ? -1.0F : 1.0F);
 
-        // yaw: heading = steer the horse (the mounted aim direction, verified; the
-        // camera anchor follows so the view and crosshair turn with it, applied post
-        // Update so movement processing cannot overwrite it); rider = rotate only the
-        // rider (FP-style SetRotationZ, horse keeps its course); compose = camera-only
-        // yaw through the GetRotation hook.
+        // yaw: orbit = the stick's own channel (freeRotation.x increments; the aim
+        // camera orbits the horse, crosshair follows, horse keeps its course -- the
+        // round-26 default, stick-verified and TDM-source-verified); heading = steer
+        // the horse+rider together (verified, but changes the horse's course); rider =
+        // proven infeasible (mount re-slaves rider yaw every frame); compose =
+        // camera-only yaw through the GetRotation hook.
         if (s.injectMountedYaw == InjectionMethod::kCompose) {
             _horseYawAcc += yaw;
+        } else if (s.injectMountedYaw == InjectionMethod::kHeading) {
+            if (RE::Actor* horse =
+                    a_state->horseRefHandle ? static_cast<RE::Actor*>(a_state->horseRefHandle.get().get()) : nullptr) {
+                horse->SetRotationZ(horse->data.angle.z - yaw);
+                a_state->horseCurrentDirection = horse->GetHeading(false);
+            }
         } else if (s.injectMountedYaw == InjectionMethod::kRider) {
             if (auto* player = RE::PlayerCharacter::GetSingleton()) {
                 player->SetRotationZ(player->data.angle.z - yaw);
             }
-        } else if (RE::Actor* horse = a_state->horseRefHandle
-                                          ? static_cast<RE::Actor*>(a_state->horseRefHandle.get().get())
-                                          : nullptr) {
-            horse->SetRotationZ(horse->data.angle.z - yaw);
-            a_state->horseCurrentDirection = horse->GetHeading(false);
+        } else {
+            a_state->freeRotation.x -= yaw;  // orbit: same sign convention as TP field
         }
 
         // pitch: compose = round-22 verified GetRotation consumption path (default);
